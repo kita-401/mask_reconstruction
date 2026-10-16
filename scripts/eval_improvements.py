@@ -56,7 +56,23 @@ VARIANTS = {
     "lb23": ("L23. LingBot +改善2+3", replace(BASE, **IMP2, **IMP3)),
     "lb23_loso": ("L23'. LingBot +改善2+3（τ: LOSO）", replace(BASE, **IMP2, **IMP3, **LOSO)),
     "lb23_e3": ("L23e. LingBot +改善2+3（寸法は3px収縮）", replace(BASE, **IMP2, **IMP3, size_erode_px=3)),
+    # 高速化 B：hier_improved_v2 の法線を深度画像上の差分で求める
+    "v2": ("hier_improved_v2", None),
+    "v2_fast5": ("hier_improved_v2 + 高速な法線（窓 5px）", dict(fast_normals=True, fast_normal_window=5)),
+    "v2_fast7": ("hier_improved_v2 + 高速な法線（窓 7px）", dict(fast_normals=True, fast_normal_window=7)),
+    "v2_fast9": ("hier_improved_v2 + 高速な法線（窓 9px）", dict(fast_normals=True, fast_normal_window=9)),
 }
+
+
+def _v2_variants():
+    from export_masks import METHODS
+    for key in ("v2", "v2_fast5", "v2_fast7", "v2_fast9"):
+        name, kw = VARIANTS[key]
+        VARIANTS[key] = (name, replace(METHODS["hier_improved_v2"], **(kw or {})))
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+_v2_variants()
 
 
 def fragment_labels(kept, masks):

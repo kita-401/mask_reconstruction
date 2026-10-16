@@ -65,22 +65,30 @@ def boundary_depth_gap(mask_k, mask_l, dil_k, dil_l, pts, valid_idx, v_u, v_v):
     return abs(np.median(z_k) - np.median(z_l))
 
 
-def cylinder_axis(p, cfg: Config, rng):
+def cylinder_axis(p, cfg: Config, rng, normals=None):
     """法線の主成分分析で断片の円筒中心軸を求める．
 
     円筒面の法線は軸と直交するので，Σ n nᵀ の最小固有値の固有ベクトルが軸方向．
     各点を法線の逆向きに半径だけ移動すると軸上に乗るので，その中央値を軸の通過点とする．
 
+    normals を渡すと（fast_normals：深度画像上で求めた法線），断片ごとの法線推定を省く．
+
     Returns: (方向 d, 通過点 c0, 軸上の範囲 t_min, t_max)
     """
-    import open3d as o3d
-
-    if len(p) > cfg.axis_max_points:
-        p = p[rng.choice(len(p), cfg.axis_max_points, replace=False)]
-    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(p))
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.normal_radius, max_nn=30))
-    pc.orient_normals_towards_camera_location(np.zeros(3))
-    n = np.asarray(pc.normals)
+    if normals is not None:
+        ok = np.linalg.norm(normals, axis=1) > 0
+        p, n = p[ok], normals[ok]
+        if len(p) > cfg.axis_max_points:
+            sel = rng.choice(len(p), cfg.axis_max_points, replace=False)
+            p, n = p[sel], n[sel]
+    else:
+        import open3d as o3d
+        if len(p) > cfg.axis_max_points:
+            p = p[rng.choice(len(p), cfg.axis_max_points, replace=False)]
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(p))
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.normal_radius, max_nn=30))
+        pc.orient_normals_towards_camera_location(np.zeros(3))
+        n = np.asarray(pc.normals)
     _, V = np.linalg.eigh(n.T @ n / len(n))
     d = V[:, 0]
     c = p - cfg.pipe_radius * n
@@ -111,7 +119,15 @@ def distance_matrix(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     centers, axes = fragment_pca(masks, pts, valid_idx, v_u, v_v)
     if cfg.use_cylinder_axis:
         rng = np.random.default_rng(0)
-        cyl = [cylinder_axis(pts[valid_idx[m[v_v, v_u]]], cfg, rng) for m in masks]
+        if cfg.fast_normals:
+            from .graph_merging import _normal_image
+            Nflat = _normal_image(pts, valid_idx, v_u, v_v, masks[0].shape, cfg)[v_v, v_u]
+            cyl = []
+            for m in masks:
+                sel = np.flatnonzero(m[v_v, v_u])
+                cyl.append(cylinder_axis(pts[valid_idx[sel]], cfg, rng, normals=Nflat[sel]))
+        else:
+            cyl = [cylinder_axis(pts[valid_idx[m[v_v, v_u]]], cfg, rng) for m in masks]
         areas = [int(m.sum()) for m in masks]
     kernel = np.ones((cfg.adjacency_kernel, cfg.adjacency_kernel), np.uint8)
     dilated = [cv2.dilate(m.astype(np.uint8), kernel) > 0 for m in masks]

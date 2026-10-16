@@ -43,7 +43,18 @@ def _depth_image(pts, valid_idx, v_u, v_v, shape):
 
 
 def _normal_image(pts, valid_idx, v_u, v_v, shape, cfg):
-    """画素ごとの法線（全点群で推定）．同じ点群なら1回だけ計算する（読み取り専用で使うこと）．"""
+    """画素ごとの法線．同じ点群なら1回だけ計算する（読み取り専用で使うこと）．
+
+    fast_normals=True なら，Open3D の近傍探索ではなく深度画像上の差分の外積で求める（convexity.py と同じ）．
+    求められない画素は 0 ベクトル．
+    """
+    if cfg.fast_normals:
+        def make_fast():
+            from .convexity import organized_normals, point_image
+            P, V = point_image(pts, valid_idx, v_u, v_v, shape)
+            return organized_normals(P, V, cfg.fast_normal_window)[0]
+        return POINT_CACHE.get(pts, valid_idx, ("normals_fast", shape, cfg.fast_normal_window), make_fast)
+
     def make():
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
         pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.boundary_normal_radius, max_nn=30))

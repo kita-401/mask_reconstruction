@@ -175,6 +175,12 @@ class Config:
     post_depth_thresh: float = 0.005    # [m] 局所平均深度との差がこれ未満の画素だけ加える
     cad_cache_dir: str = str(RESULTS_DIR / "cad_prior")
 
+    # --- 高速化：統合で使う法線（境界の法線・円筒軸）を深度画像上の差分の外積で求める ---
+    # False なら従来どおり Open3D の近傍探索（全点群 boundary_normal_radius，円筒軸は断片ごとに normal_radius）
+    fast_normals: bool = False
+    # [px] 差分をとる窓（convexity.organized_normals）．hier_improved_v2 の10配置で 5/7/9 を比べ，9 が従来と同等以上
+    fast_normal_window: int = 9
+
     # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
     # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
     use_plane_removal: bool = False
