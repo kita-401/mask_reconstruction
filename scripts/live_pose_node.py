@@ -44,6 +44,7 @@ from pose_estimation import PoseConfig, SVDICPRegistration  # noqa: E402
 from pose_estimation.evaluation import free_space_violation  # noqa: E402
 from pose_estimation.frames import Frame  # noqa: E402
 from pose_estimation.pointcloud import load_model, mask_to_points, preprocess  # noqa: E402
+from pose_estimation.registration_gpu import GPUBatchRegistration  # noqa: E402
 from pose_estimation.visualization import _color, draw_poses  # noqa: E402
 
 CAM_FRAME = "camera_color_optical_frame"
@@ -149,7 +150,8 @@ class LivePoseNode(Node):
             cfg = replace(cfg, use_plane_removal=True)
         self.recon = MaskReconstructor(cfg)
         self.pc = PoseConfig()
-        self.reg = SVDICPRegistration(self.pc)
+        # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
+        self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
         self.model_vis = self.model[::3]
         self.save_dir = None
@@ -200,12 +202,23 @@ class LivePoseNode(Node):
         frame = Frame(rgb=s.rgb, depth=s.depth, K=K)
         poses, rows = [], []
         t1 = time.perf_counter()
+        clouds = {}
         for i, m in enumerate(masks):
             p = mask_to_points(m, frame, self.pc)
-            if len(p) < self.pc.min_points:
+            if len(p) >= self.pc.min_points:
+                clouds[i] = preprocess(p, self.pc)
+        t_prep = time.perf_counter() - t1
+        t2 = time.perf_counter()
+        if isinstance(self.reg, GPUBatchRegistration):
+            results = dict(zip(clouds, self.reg.batch(self.model, list(clouds.values()))))
+        else:
+            results = {i: self.reg(self.model, p) for i, p in clouds.items()}
+        t_reg = time.perf_counter() - t2
+        for i in range(len(masks)):
+            r = results.get(i)
+            if r is None:
                 poses.append(None)
                 continue
-            r = self.reg(self.model, preprocess(p, self.pc))
             T = r.T_model_to_cam
             poses.append(T)
             rows.append(dict(id=i, T=T.tolist(), icp_fitness=r.icp_fitness,
@@ -222,7 +235,8 @@ class LivePoseNode(Node):
         self.pub_overlay.publish(image_msg(overlay, stamp))
         self.publish_models(named, len(poses), stamp)
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個 "
-                               f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms）")
+                               f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
+                               f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
         if self.save_dir is not None:
             d = self.save_dir / f"frame{k:04d}"
             d.mkdir(exist_ok=True)
@@ -264,6 +278,7 @@ class LivePoseNode(Node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="hier_improved_v2", choices=list(METHODS))
+    ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")
     ap.add_argument("--max-frames", type=int, default=0, help=">0 ならこの回数推定して終了（動作確認用）")

@@ -12,7 +12,8 @@ conda activate vlm_rag
 # 他の PC から見るときは ROS_LOCALHOST_ONLY_LIVE=0 を付けて起動する
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID_LIVE:-11}"
 export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY_LIVE:-1}"
-rviz2 -d scripts/rviz/live_pose.rviz &
+# ROS 2 のログファイル（~/.ros/log）は書き出さない
+rviz2 -d scripts/rviz/live_pose.rviz --ros-args --disable-external-lib-logs &
 RVIZ_PID=$!
 trap 'kill $RVIZ_PID 2>/dev/null' EXIT
-python scripts/live_pose_node.py "$@"
+python scripts/live_pose_node.py "$@" --ros-args --disable-external-lib-logs
