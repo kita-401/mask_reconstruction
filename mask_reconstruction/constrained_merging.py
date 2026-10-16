@@ -129,7 +129,11 @@ class SizeChecker:
         self.masks = masks
         rng = np.random.default_rng(0)
         self.frag_pts = []
+        ek = np.ones((2 * cfg.size_erode_px + 1,) * 2, np.uint8) if cfg.size_erode_px > 0 else None
         for m in masks:
+            if ek is not None:
+                me = cv2.erode(m.astype(np.uint8), ek) > 0
+                m = me if np.count_nonzero(me[v_v, v_u]) >= 10 else m
             p = pts[valid_idx[m[v_v, v_u]]]
             if len(p) > cfg.max_points_per_fragment:
                 p = p[rng.choice(len(p), cfg.max_points_per_fragment, replace=False)]

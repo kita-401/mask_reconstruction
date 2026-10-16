@@ -146,6 +146,7 @@ class Config:
     use_size_constraint: bool = False
     size_margin: float = 0.15           # m．(1+m)×CAD値を超える統合を禁止
     size_percentile: float = 2.0        # 寸法・最大径は [p, 100-p] パーセンタイルの範囲で計算
+    size_erode_px: int = 0              # 寸法・最大径の点群を取る前にマスクを収縮する [px]（縁の他物体の点対策．面積には使わない）
     cad_proj_rotations: int = 500       # A_cad を求めるランダム回転の数
     cad_proj_seed: int = 0
     # 自前の平均連結を使う（制約オフでも True にすれば自前実装．テストで scipy と比較する）
@@ -161,7 +162,9 @@ class Config:
     concave_ratio_thresh: float = 0.5   # τ_r
     concave_angle_thresh: float = -1.0  # τ_a [deg]．負なら CAD の最大凹角 θ_cad_max + concave_angle_margin
     concave_angle_margin: float = 10.0  # [deg]
-    convex_bonus: float = 0.0           # β．凸・平坦な境界の距離から引く量（0 なら距離行列から自動で提案値）
+    # β．凸・平坦な境界の距離から引く量．scripts/analyze_pairs.py の leave-one-scene-out で
+    # 全10折とも 5.0 が選ばれた（基本コストの分布：同一部品の中央値 ≈5，別部品 ≈7.5，cluster_thresh 1.5）
+    convex_bonus: float = 5.0
     concave_penalty: float = 10.0       # 凹と判定した境界に足す量（既存の adjacent_penalty と同じ）
     cad_concave_pair_dist: tuple = (0.004, 0.010)  # [m] CAD上で凹凸を調べる点対の距離（境界をはさむ2点の間隔）
     cad_concave_percentile: float = 99.0  # θ_cad_max として使う凹角分布のパーセンタイル
