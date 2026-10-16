@@ -17,12 +17,23 @@ from .registration_svd import FLIP_PATTERNS, RegistrationResult
 _EPS_REL = 1e-6   # Open3D の ICPConvergenceCriteria の既定値（relative_fitness, relative_rmse）
 
 
-def _nearest(x, tmpl, tmpl_sq):
+_HIDDEN = 1.0e4   # 見えないモデル点への罰則 [m²]（対応点の閾値よりずっと大きい）
+
+
+def _nearest(x, tmpl, tmpl_sq, hidden=None):
     """x (P, 3) の各点から tmpl (M, 3) への最近傍距離とインデックス．
 
     |x − t|² = |x|² + |t|² − 2 x·t の |x|² は行ごとに一定なので，|t|² − 2 x·t（行列積1回）の最小を取ってから足す．
     """
-    d2, idx = torch.addmm(tmpl_sq[None], x, tmpl.T, beta=1.0, alpha=-2.0).min(dim=1)
+    if hidden is None:
+        d2 = torch.addmm(tmpl_sq[None], x, tmpl.T, beta=1.0, alpha=-2.0)
+    else:
+        # hidden = (pen (B, M)：見えないモデル点に _HIDDEN，見える点に 0，bid (P,))．
+        # 計測点に部品番号の one-hot を足し，モデル側に罰則の行を足して，距離と罰則を1回の行列積で求める
+        pen, bid = hidden
+        onehot = torch.nn.functional.one_hot(bid, pen.shape[0]).to(x.dtype)
+        d2 = torch.addmm(tmpl_sq[None], torch.cat([x, onehot], dim=1), torch.cat([-2.0 * tmpl.T, pen], dim=0))
+    d2, idx = d2.min(dim=1)
     return (d2 + (x * x).sum(dim=1)).clamp(min=0).sqrt(), idx
 
 
@@ -59,6 +70,21 @@ class GPUBatchRegistration:
     def __call__(self, model_pts, measured_pts) -> RegistrationResult:
         return self.batch(model_pts, [measured_pts])[0]
 
+    def _model_normals(self, model_pts):
+        """モデル点の外向き法線（向きを表面に沿って伝えてそろえ，重心から外向きが多数派になるようにする）．"""
+        key = (id(model_pts), len(model_pts))
+        if getattr(self, "_normals_key", None) != key:
+            import open3d as o3d
+            pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(model_pts[:, :3]))
+            pcd.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(20))
+            pcd.orient_normals_consistent_tangent_plane(20)
+            n = np.asarray(pcd.normals)
+            if np.mean(np.sum((model_pts[:, :3] - model_pts[:, :3].mean(axis=0)) * n, axis=1) > 0) < 0.5:
+                n = -n
+            self._normals_key = key
+            self._normals = torch.as_tensor(n, dtype=torch.float32, device=self.device)
+        return self._normals
+
     @torch.no_grad()
     def batch(self, model_pts, measured_list):
         """model_pts: (M, 3)，measured_list: [(N_i, 3)] → [RegistrationResult]"""
@@ -78,6 +104,20 @@ class GPUBatchRegistration:
         src_mean = _per_part_sum(X, bid, B) / n_pts[:, None]
         Xc = X - src_mean[bid]
 
+        visible = None
+        if cfg.icp_visible_only:
+            Nm = self._model_normals(model_pts)
+            qn = (Nm * tmpl_c).sum(dim=1)
+
+            def visible(R, t):
+                """姿勢 (R, t)（中心化した計測 → 中心化したモデル）でカメラを向いているモデル点 (B, M)．"""
+                cam = (R @ (-src_mean)[..., None]).squeeze(-1) + t      # カメラ位置（モデル座標）
+                return cam @ Nm.T - qn[None] > 0
+
+            def visible_centroid(R, t):
+                v = visible(R, t).float()
+                return (v @ tmpl_c) / v.sum(dim=1, keepdim=True).clamp(min=1)
+
         # --- 1. SVD による初期回転（計測 → モデル） ---
         basis_t = torch.linalg.svd(tmpl_c, full_matrices=False)[2].T                 # (3, 3)
         cov = _per_part_sum(Xc[:, :, None] * Xc[:, None, :], bid, B)                  # (B, 3, 3)
@@ -87,18 +127,26 @@ class GPUBatchRegistration:
         best_fit = torch.full((B,), -1.0, device=dev)
         best_R = torch.eye(3, device=dev).repeat(B, 1, 1)
         best_flip = torch.zeros(B, dtype=torch.long, device=dev)
+        best_t = torch.zeros(B, 3, device=dev)
         for k, f in enumerate(self.flips):
             R = basis_t[None] @ (basis_s * f).transpose(1, 2)                        # (B, 3, 3)
             ok = torch.linalg.det(R) > 0
-            d, _ = _nearest(torch.einsum("pij,pj->pi", R[bid], Xc), tmpl_c, tmpl_sq)
+            t = torch.zeros(B, 3, device=dev)
+            allowed = None
+            if visible is not None:   # 計測点の重心（見えている面の上）を，見える面の重心に合わせる
+                t = visible_centroid(R, t)
+                t = visible_centroid(R, t)
+                allowed = ((~visible(R, t)).float() * _HIDDEN, bid)
+            d, _ = _nearest(torch.einsum("pij,pj->pi", R[bid], Xc) + t[bid], tmpl_c, tmpl_sq, allowed)
             fit = _per_part_sum((d < cfg.flip_check_threshold).float(), bid, B) / n_pts
             better = ok & (fit > best_fit)                                            # 同点は先の候補（CPU 版の max と同じ）
             best_fit = torch.where(better, fit, best_fit)
             best_R = torch.where(better[:, None, None], R, best_R)
+            best_t = torch.where(better[:, None], t, best_t)
             best_flip = torch.where(better, torch.full_like(best_flip, k), best_flip)
 
         # --- 2. ICP（全部品を同時に．収束した部品の点は計算から外す） ---
-        R_tot, t_tot = best_R.clone(), torch.zeros(B, 3, device=dev)
+        R_tot, t_tot = best_R.clone(), best_t.clone()
         fit = torch.zeros(B, device=dev)
         rmse = torch.zeros(B, device=dev)
 
@@ -106,7 +154,8 @@ class GPUBatchRegistration:
             """sel の点について，現在の姿勢での対応点と部品ごとの fitness・RMSE．"""
             b = bid[sel]
             x = torch.einsum("pij,pj->pi", R_tot[b], Xc[sel]) + t_tot[b]
-            d, idx = _nearest(x, tmpl_c, tmpl_sq)
+            allowed = ((~visible(R_tot, t_tot)).float() * _HIDDEN, b) if visible is not None else None
+            d, idx = _nearest(x, tmpl_c, tmpl_sq, allowed)
             inl = (d < cfg.icp_threshold).float()
             n_in = _per_part_sum(inl, b, B)
             f = n_in / n_pts

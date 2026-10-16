@@ -43,6 +43,9 @@ class PoseConfig:
     # 初期姿勢候補の作り方（既定は元実装と同じ）
     hypotheses: str = "original"         # "original": 符号反転のみ / "all_perms": 軸の並べ替えも試す
     icp_all_candidates: bool = False     # True: 全候補で ICP し ICP 後 fitness 最大を採用
+    # True: 候補の選択と ICP の各反復で，その姿勢でカメラを向いている面のモデル点だけを対応先にする（GPU 版のみ）．
+    # 全周モデルで，計測面をモデルの裏面に合わせてしまう誤りを防ぐ．初期の平行移動も見える面の重心に合わせる
+    icp_visible_only: bool = False
 
     # --- 評価 ---
     eval_threshold: float = 0.003        # [m] fitness / RMSE の判定距離
