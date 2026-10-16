@@ -19,15 +19,50 @@ def fragment_pca(masks, pts, valid_idx, v_u, v_v):
     return centers, axes
 
 
+class _PointCloudCache:
+    """同じ点群（同じ配列オブジェクト）に対する画像形式の計算結果を使い回す（結果は変わらない）．
+
+    点群の配列そのものを参照として持ち，`is` で比べるので，別の点群と取り違えることはない．
+    """
+
+    def __init__(self):
+        self.key = None
+        self.store = {}
+
+    def get(self, pts, valid_idx, name, make):
+        if self.key is None or self.key[0] is not pts or self.key[1] is not valid_idx:
+            self.key = (pts, valid_idx)
+            self.store = {}
+        if name not in self.store:
+            self.store[name] = make()
+        return self.store[name]
+
+
+POINT_CACHE = _PointCloudCache()
+
+
+def depth_image(pts, valid_idx, v_u, v_v, shape):
+    """点群を画素に戻した深度画像 [m]（点のない画素は 0）．"""
+    def make():
+        Z = np.zeros(shape, dtype=np.float64)
+        Z[v_v, v_u] = pts[valid_idx, 2]
+        return Z
+    return POINT_CACHE.get(pts, valid_idx, ("depth", shape), make)
+
+
 def boundary_depth_gap(mask_k, mask_l, dil_k, dil_l, pts, valid_idx, v_u, v_v):
-    """隣接する2断片の境界付近の深度中央値の差 [m]．計算できなければ None．"""
-    b_k = pts[valid_idx[(mask_k & dil_l)[v_v, v_u]]]
-    b_l = pts[valid_idx[(mask_l & dil_k)[v_v, v_u]]]
-    b_k = b_k[b_k[:, 2] > 0]
-    b_l = b_l[b_l[:, 2] > 0]
-    if len(b_k) == 0 or len(b_l) == 0:
+    """隣接する2断片の境界付近の深度中央値の差 [m]．計算できなければ None．
+
+    点は画素と1対1に対応するので，境界の画素の深度を深度画像から直接取る（全点群からの抽出より速い）．
+    """
+    Z = depth_image(pts, valid_idx, v_u, v_v, mask_k.shape)
+    z_k = Z[mask_k & dil_l]
+    z_l = Z[mask_l & dil_k]
+    z_k = z_k[z_k > 0]
+    z_l = z_l[z_l > 0]
+    if len(z_k) == 0 or len(z_l) == 0:
         return None
-    return abs(np.median(b_k[:, 2]) - np.median(b_l[:, 2]))
+    return abs(np.median(z_k) - np.median(z_l))
 
 
 def cylinder_axis(p, cfg: Config, rng):

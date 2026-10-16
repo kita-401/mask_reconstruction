@@ -16,7 +16,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from .config import Config
-from .merging import (axis_segment_distance, boundary_depth_gap, cad_extent, cylinder_axis,
+from .merging import (POINT_CACHE, axis_segment_distance, boundary_depth_gap, cad_extent, cylinder_axis,
                       principal_extent)
 from .template_fit import template_fitness
 
@@ -43,12 +43,15 @@ def _depth_image(pts, valid_idx, v_u, v_v, shape):
 
 
 def _normal_image(pts, valid_idx, v_u, v_v, shape, cfg):
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
-    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.boundary_normal_radius, max_nn=30))
-    pcd.orient_normals_towards_camera_location(np.zeros(3))
-    N = np.zeros((*shape, 3))
-    N[v_v, v_u] = np.asarray(pcd.normals)
-    return N
+    """画素ごとの法線（全点群で推定）．同じ点群なら1回だけ計算する（読み取り専用で使うこと）．"""
+    def make():
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.boundary_normal_radius, max_nn=30))
+        pcd.orient_normals_towards_camera_location(np.zeros(3))
+        N = np.zeros((*shape, 3))
+        N[v_v, v_u] = np.asarray(pcd.normals)
+        return N
+    return POINT_CACHE.get(pts, valid_idx, ("normals", shape, cfg.boundary_normal_radius), make)
 
 
 def boundary_normal_angle(fa, fb, N):
