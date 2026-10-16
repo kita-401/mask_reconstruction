@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # 実機（D405）で撮影 → セグメンテーション → 姿勢推定を繰り返し，RViz2 で TF・モデル・推定画像を表示する．
-#   bash scripts/run_live_pose.sh                       # hier_improved_v2
+# カメラノード（撮影・配信）と推定ノードは別プロセスで動かす．
+#   bash scripts/run_live_pose.sh                       # hier_improved_v2_fast
+#   bash scripts/run_live_pose.sh --method hier_improved_v2
 #   bash scripts/run_live_pose.sh --save                # 推定ごとに results/live/ に保存
-# 終了は Ctrl+C（RViz2 も閉じる）
+# 終了は Ctrl+C（カメラノード・RViz2 も閉じる）
 set -e
 cd "$(dirname "$0")/.."
 source /opt/ros/humble/setup.bash
@@ -13,7 +15,9 @@ conda activate vlm_rag
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID_LIVE:-11}"
 export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY_LIVE:-1}"
 # ROS 2 のログファイル（~/.ros/log）は書き出さない
+python scripts/camera_node.py --ros-args --disable-external-lib-logs &
+CAM_PID=$!
 rviz2 -d scripts/rviz/live_pose.rviz --ros-args --disable-external-lib-logs &
 RVIZ_PID=$!
-trap 'kill $RVIZ_PID 2>/dev/null' EXIT
+trap 'kill -INT $CAM_PID 2>/dev/null; kill $RVIZ_PID 2>/dev/null' EXIT
 python scripts/live_pose_node.py "$@" --ros-args --disable-external-lib-logs
