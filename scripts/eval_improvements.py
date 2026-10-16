@@ -33,6 +33,8 @@ IMP1 = replace(BASE, depth_refine=False, depth_temporal=True)
 IMP2 = dict(use_size_constraint=True)
 IMP3 = dict(use_convexity=True, no_force_connect=True)
 IMP5 = dict(post_close=True)
+# 凹判定の閾値：既定は CAD 由来（τ_a = θ_cad_max + 10°）．LOSO は analyze_pairs.py で選んだ値
+LOSO = dict(concave_ratio_thresh=0.5, concave_angle_thresh=35.0)
 
 VARIANTS = {
     "base": ("1. ベースライン（既存手法）", BASE),
@@ -41,7 +43,68 @@ VARIANTS = {
     "imp13": ("4. +改善1+3（凸性・強制0.1廃止）", replace(IMP1, **IMP3)),
     "imp123": ("5. +改善1+2+3（全部）", replace(IMP1, **IMP2, **IMP3)),
     "imp1235": ("6. +改善1+2+3+5（後処理）", replace(IMP1, **IMP2, **IMP3, **IMP5)),
+    "imp13_loso": ("4'. +改善1+3（τ: LOSO）", replace(IMP1, **IMP3, **LOSO)),
+    "imp123_loso": ("5'. +改善1+2+3（τ: LOSO）", replace(IMP1, **IMP2, **IMP3, **LOSO)),
+    "imp1235_loso": ("6'. +改善1+2+3+5（τ: LOSO）", replace(IMP1, **IMP2, **IMP3, **IMP5, **LOSO)),
+    "imp12_e3": ("3e. +改善1+2（寸法は3px収縮）", replace(IMP1, **IMP2, size_erode_px=3)),
+    "imp123_e3": ("5e. +改善1+2+3（寸法は3px収縮）", replace(IMP1, **IMP2, **IMP3, size_erode_px=3)),
+    "imp123_loso_e3": ("5e'. +改善1+2+3（τ: LOSO，3px収縮）",
+                       replace(IMP1, **IMP2, **IMP3, **LOSO, size_erode_px=3)),
 }
+
+
+def fragment_labels(kept, masks):
+    """各断片が含まれる統合マスクの番号（後処理で画素が増えても，断片を最も多く含むマスク）．"""
+    return np.array([int(np.argmax([np.sum(f & m) for m in masks])) for f in kept])
+
+
+def breakdown(kept, masks, gts, T, cfg, events, overlap=0.2):
+    """残った過分割・過統合が，どの判定で起きたかの内訳．
+
+    過分割（GT が2つ以上の予測に面積20%超ずつ覆われる）：その GT の断片で別々の予測に入った対のうち，
+      距離最小の対に適用された判定（サイズ制約で止めた対は size:<条件>，隣接しない対は non_adjacent）
+    過統合（予測が2つ以上の GT にまたがる）：1つの断片が2つ以上の GT にまたがれば fastsam_fragment，
+      そうでなければ，別々の GT の断片で同じ予測に入った対のうち距離最小の対の判定
+    """
+    from collections import Counter
+    D = cm.distance_from_table(T, cfg)
+    lab = fragment_labels(kept, masks)
+    gts = [g for g in gts if g.sum() > 0]
+    fg = [int(np.argmax([np.sum(f & g) for g in gts])) if any(np.sum(f & g) for g in gts) else -1 for f in kept]
+    blocked = {}
+    for a, b, _, viol in events:
+        if viol:
+            for x in a:
+                for y in b:
+                    blocked[(min(x, y), max(x, y))] = "size:" + "+".join(viol)
+    over, under = Counter(), Counter()
+    for gi, g in enumerate(gts):
+        cover = [j for j, m in enumerate(masks) if np.sum(g & m) / g.sum() > overlap]
+        if len(cover) < 2:
+            continue
+        cand = [(D[x, y], x, y) for x in range(len(kept)) for y in range(x + 1, len(kept))
+                if fg[x] == gi and fg[y] == gi and lab[x] != lab[y] and lab[x] in cover and lab[y] in cover]
+        if not cand:
+            over["other(断片なし)"] += 1
+            continue
+        _, x, y = min(cand)
+        over[blocked.get((x, y)) or cm.pair_rule(T, x, y, cfg)] += 1
+    for j, m in enumerate(masks):
+        hit = [gi for gi, g in enumerate(gts) if np.sum(g & m) / m.sum() > overlap]
+        if len(hit) < 2:
+            continue
+        members = [x for x in range(len(kept)) if lab[x] == j]
+        if any(sum(np.sum(kept[x] & gts[gi]) / kept[x].sum() > overlap for gi in hit) >= 2 for x in members):
+            under["fastsam_fragment"] += 1
+            continue
+        cand = [(D[x, y], x, y) for x in members for y in members if x < y and fg[x] != fg[y]
+                and fg[x] in hit and fg[y] in hit]
+        if not cand:
+            under["other"] += 1
+            continue
+        _, x, y = min(cand)
+        under[cm.pair_rule(T, x, y, cfg)] += 1
+    return dict(over), dict(under)
 
 
 def run(variant_keys, configs):
@@ -65,13 +128,22 @@ def run(variant_keys, configs):
             d, t_depth = depth_cache[dkey]
             pts, vi, vu, vv = depth_to_points(d, s, cfg)
             kept = filter_fragments(frags, s.rgb, vu, vv, vi, cfg)
+            tkey = ("table",) + dkey
+            if tkey not in depth_cache:   # 内訳用の断片対の特徴（深度ごとに1回）
+                depth_cache[tkey] = cm.pair_table(kept, pts, vi, vu, vv, replace(cfg, use_convexity=True),
+                                                  convexity=True)
             cm.LAST_INFO.clear()
             t0 = time.perf_counter()
             masks = merge_fragments(kept, pts, vi, vu, vv, cfg, cam=(s.fx, s.fy, s.cx, s.cy))
             t_merge = (time.perf_counter() - t0) * 1000
+            if "D" in cm.LAST_INFO:   # 内訳に使う距離行列が実際の統合と同じであることの確認
+                assert np.allclose(cm.LAST_INFO["D"], cm.distance_from_table(depth_cache[tkey], cfg))
+            over_c, under_c = breakdown(kept, masks, s.gt_masks, depth_cache[tkey], cfg,
+                                        cm.LAST_INFO.get("events", []))
             rows[key].append({"config": i, "n": len(masks), "n_frag": len(kept),
                               "depth_ms": t_depth, "merge_ms": t_merge,
                               "size_stops": dict(cm.LAST_INFO.get("stops", {})),
+                              "over_causes": over_c, "under_causes": under_c,
                               **evaluate_masks(masks, s.gt_masks)})
         print(f"config {i} done", flush=True)
     return rows
@@ -94,6 +166,17 @@ def table(rows):
                 tot[k] = tot.get(k, 0) + v
         if tot:
             lines.append(f"\n{VARIANTS[key][0]}：サイズ制約で止めた統合（10配置合計，1回で複数条件あり）: {tot}")
+    lines.append("\n残った過分割・過統合の原因（10配置合計）")
+    lines.append("| 構成 | 過分割の原因 | 過統合の原因 |\n|---|---|---|")
+    for key, rs in rows.items():
+        agg = []
+        for f in ("over_causes", "under_causes"):
+            tot = {}
+            for r in rs:
+                for k, v in r[f].items():
+                    tot[k] = tot.get(k, 0) + v
+            agg.append(", ".join(f"{k} {v}" for k, v in sorted(tot.items(), key=lambda kv: -kv[1])))
+        lines.append(f"| {VARIANTS[key][0]} | {agg[0]} | {agg[1]} |")
     return "\n".join(lines)
 
 

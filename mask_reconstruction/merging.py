@@ -221,6 +221,12 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.post_close:
+        # 2026-10-16 の改善5（postprocess.py）
+        from dataclasses import replace
+        from .postprocess import close_masks
+        merged = merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, post_close=False), cam)
+        return close_masks(merged, pts, valid_idx, v_u, v_v, cfg)
     if cfg.use_size_constraint or cfg.own_linkage or cfg.use_convexity or cfg.no_force_connect:
         # 2026-10-16 の改善2・3（constrained_merging.py）．フラグがすべてオフならここは通らない
         from .constrained_merging import merge_constrained
