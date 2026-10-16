@@ -8,9 +8,10 @@ cd "$(dirname "$0")/.."
 source /opt/ros/humble/setup.bash
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate vlm_rag
-# 同じネットワークの他の ROS 2 システム（xArm など）と混ざらないよう，別のドメインで PC 内だけで通信する
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID_LIVE:-42}"
-export ROS_LOCALHOST_ONLY=1
+# 同じネットワークの他の ROS 2 システム（ドメイン 0 の xArm など）と混ざらないよう，ドメイン 11 で PC 内だけで通信する
+# 他の PC から見るときは ROS_LOCALHOST_ONLY_LIVE=0 を付けて起動する
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID_LIVE:-11}"
+export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY_LIVE:-1}"
 rviz2 -d scripts/rviz/live_pose.rviz &
 RVIZ_PID=$!
 trap 'kill $RVIZ_PID 2>/dev/null' EXIT
