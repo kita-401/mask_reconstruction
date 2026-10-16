@@ -221,6 +221,10 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.use_size_constraint or cfg.own_linkage or cfg.use_convexity or cfg.no_force_connect:
+        # 2026-10-16 の改善2・3（constrained_merging.py）．フラグがすべてオフならここは通らない
+        from .constrained_merging import merge_constrained
+        return merge_constrained(masks, pts, valid_idx, v_u, v_v, cfg, cam)
     if cfg.auto_model_shape:
         from dataclasses import replace
         from .model_shape import cylinder_info_from_file

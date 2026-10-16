@@ -24,6 +24,7 @@ from mask_reconstruction.depth import depth_to_points  # noqa: E402
 from mask_reconstruction.evaluation import METRICS  # noqa: E402
 from mask_reconstruction.fragments import filter_fragments  # noqa: E402
 from mask_reconstruction.merging import merge_fragments  # noqa: E402
+from mask_reconstruction import constrained_merging as cm  # noqa: E402
 from mask_reconstruction.pipeline import compute_depth  # noqa: E402
 
 # 点群のスケールを CAD と比べるため，内部パラメータは正しいスケール（848x480）で統一する
@@ -64,11 +65,13 @@ def run(variant_keys, configs):
             d, t_depth = depth_cache[dkey]
             pts, vi, vu, vv = depth_to_points(d, s, cfg)
             kept = filter_fragments(frags, s.rgb, vu, vv, vi, cfg)
+            cm.LAST_INFO.clear()
             t0 = time.perf_counter()
             masks = merge_fragments(kept, pts, vi, vu, vv, cfg, cam=(s.fx, s.fy, s.cx, s.cy))
             t_merge = (time.perf_counter() - t0) * 1000
             rows[key].append({"config": i, "n": len(masks), "n_frag": len(kept),
                               "depth_ms": t_depth, "merge_ms": t_merge,
+                              "size_stops": dict(cm.LAST_INFO.get("stops", {})),
                               **evaluate_masks(masks, s.gt_masks)})
         print(f"config {i} done", flush=True)
     return rows
@@ -84,6 +87,13 @@ def table(rows):
         lines.append(f"| {VARIANTS[key][0]} | {ms('miou', 100)} | {ms('prec', 100)} | {ms('rec', 100)} | "
                      f"{ms('over')} | {ms('under')} | {ms('n')} | {ms('depth_ms', fmt='{:.0f}')} | "
                      f"{ms('merge_ms', fmt='{:.0f}')} |")
+    for key, rs in rows.items():
+        tot = {}
+        for r in rs:
+            for k, v in r.get("size_stops", {}).items():
+                tot[k] = tot.get(k, 0) + v
+        if tot:
+            lines.append(f"\n{VARIANTS[key][0]}：サイズ制約で止めた統合（10配置合計，1回で複数条件あり）: {tot}")
     return "\n".join(lines)
 
 
