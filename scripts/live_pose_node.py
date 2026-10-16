@@ -44,7 +44,7 @@ from mask_reconstruction.io import Sample, input_size  # noqa: E402
 from pose_estimation import PoseConfig, SVDICPRegistration  # noqa: E402
 from pose_estimation.evaluation import free_space_violation  # noqa: E402
 from pose_estimation.frames import Frame  # noqa: E402
-from pose_estimation.pointcloud import load_model, mask_to_points, preprocess  # noqa: E402
+from pose_estimation.pointcloud import enough_points, load_model, mask_to_points, preprocess  # noqa: E402
 from pose_estimation.registration_gpu import GPUBatchRegistration  # noqa: E402
 from pose_estimation.visualization import _color, draw_poses  # noqa: E402
 
@@ -85,7 +85,10 @@ class LivePoseNode(Node):
         if not args.no_cpp:             # 重い基本処理を C++ で（結果は Python 版と同じ）
             cfg = replace(cfg, use_cpp=True)
         self.recon = MaskReconstructor(cfg)
-        self.pc = PoseConfig()
+        # 位置合わせ・点数の比のモデル：full＝全周（既定），half＝カメラ側半分（従来）
+        model_path = str(Path(PoseConfig().model_path).with_name(f"t_pipe_{args.model}.pcd"))
+        self.pc = PoseConfig(model_path=model_path, ratio_model_path=model_path,
+                             min_model_ratio=args.min_model_ratio)
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
@@ -145,11 +148,17 @@ class LivePoseNode(Node):
         frame = Frame(rgb=s.rgb, depth=s.depth, K=K)
         poses, rows = [], []
         t1 = time.perf_counter()
-        clouds = {}
+        clouds, skipped = {}, []
         for i, m in enumerate(masks):
             p = mask_to_points(m, frame, self.pc)
-            if len(p) >= self.pc.min_points:
-                clouds[i] = preprocess(p, self.pc)
+            if len(p) < self.pc.min_points:
+                skipped.append(i)
+                continue
+            p = preprocess(p, self.pc)
+            if enough_points(p, self.pc):
+                clouds[i] = p
+            else:            # 一部しか見えていない（奥に隠れている）部品は位置合わせしない
+                skipped.append(i)
         t_prep = time.perf_counter() - t1
         t2 = time.perf_counter()
         if isinstance(self.reg, GPUBatchRegistration):
@@ -172,12 +181,15 @@ class LivePoseNode(Node):
             self.poses = named
         self.publish_tf()
         stamp = self.get_clock().now().to_msg()
-        overlay = draw_poses(frame, self.model, poses, masks)
-        cv2.putText(overlay, f"#{k}  parts {len(named)}  seg {t_seg*1000:.0f}ms  pose {t_pose*1000:.0f}ms",
+        overlay = draw_poses(frame, self.model, poses, masks)   # 色は RViz のモデル表示と同じ（部品の番号順）
+        for i in skipped:   # 位置合わせしなかった部品は輪郭を灰色で上書き
+            cnts, _ = cv2.findContours(masks[i].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, cnts, -1, (150, 150, 150), 2)
+        cv2.putText(overlay, f"#{k}  parts {len(named)} (skip {len(skipped)})  seg {t_seg*1000:.0f}ms  pose {t_pose*1000:.0f}ms",
                     (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_overlay.publish(image_msg(overlay, stamp))
         self.publish_models(named, len(poses), stamp)
-        self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個 "
+        self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個）"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
                                f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
         if self.save_dir is not None:
@@ -216,6 +228,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="hier_improved_v2_fast", choices=list(METHODS))
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
+    ap.add_argument("--model", choices=["full", "half"], default="full",
+                    help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
+    ap.add_argument("--min-model-ratio", type=float, default=0.10,
+                    help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")

@@ -26,6 +26,10 @@ class PoseConfig:
     depth_max: float = 2.0              # [m]
     mask_erode_px: int = 3              # マスク境界の飛び点を避けるため収縮させる
     min_points: int = 100               # これ未満のインスタンスは推定しない
+    # ボクセルで間引いた後の計測点数が，同じボクセルで間引いた全周モデル（ratio_model_path）の点数の
+    # この割合未満なら位置合わせしない（奥に隠れて一部しか見えていない部品を除く）．0 なら判定しない（従来どおり）
+    min_model_ratio: float = 0.0
+    ratio_model_path: str = str(PKG_DIR / "models" / "t_pipe_full.pcd")
     outlier_nb: int = 20                # 統計的外れ値除去（0 で無効）
     outlier_std: float = 2.0
 
