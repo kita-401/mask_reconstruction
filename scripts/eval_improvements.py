@@ -50,6 +50,12 @@ VARIANTS = {
     "imp123_e3": ("5e. +改善1+2+3（寸法は3px収縮）", replace(IMP1, **IMP2, **IMP3, size_erode_px=3)),
     "imp123_loso_e3": ("5e'. +改善1+2+3（τ: LOSO，3px収縮）",
                        replace(IMP1, **IMP2, **IMP3, **LOSO, size_erode_px=3)),
+    # LingBot-Depth ありで改善2・3を使う場合
+    "lb2": ("L2. LingBot +改善2", replace(BASE, **IMP2)),
+    "lb3": ("L3. LingBot +改善3", replace(BASE, **IMP3)),
+    "lb23": ("L23. LingBot +改善2+3", replace(BASE, **IMP2, **IMP3)),
+    "lb23_loso": ("L23'. LingBot +改善2+3（τ: LOSO）", replace(BASE, **IMP2, **IMP3, **LOSO)),
+    "lb23_e3": ("L23e. LingBot +改善2+3（寸法は3px収縮）", replace(BASE, **IMP2, **IMP3, size_erode_px=3)),
 }
 
 
