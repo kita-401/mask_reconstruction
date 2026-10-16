@@ -174,3 +174,11 @@ class Config:
     post_close_ksize: int = 7           # [px]
     post_depth_thresh: float = 0.005    # [m] 局所平均深度との差がこれ未満の画素だけ加える
     cad_cache_dir: str = str(RESULTS_DIR / "cad_prior")
+
+    # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
+    # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
+    use_plane_removal: bool = False
+    plane_dist_thresh: float = 0.005    # [m] 平面からこの距離以内の点を「平面上」とする
+    plane_max_ratio: float = 0.5
+    plane_voxel: float = 0.005          # [m] 平面推定の前に点群を間引く
+    plane_ransac_iter: int = 1000

@@ -143,7 +143,11 @@ class LivePoseNode(Node):
         self.cam = Camera()
         self.get_logger().info(f"カメラ: {self.cam.intr}")
         self.get_logger().info(f"セグメンテーション（{args.method}）と姿勢推定のモデルを読み込んでいます…")
-        self.recon = MaskReconstructor(METHODS[args.method])
+        cfg = METHODS[args.method]
+        if not args.no_plane_removal:   # 黒いトレイ以外の背景（机など）を平面として除く
+            from dataclasses import replace
+            cfg = replace(cfg, use_plane_removal=True)
+        self.recon = MaskReconstructor(cfg)
         self.pc = PoseConfig()
         self.reg = SVDICPRegistration(self.pc)
         self.model = load_model(self.pc)
@@ -225,7 +229,9 @@ class LivePoseNode(Node):
             cv2.imwrite(str(d / "rgb.png"), rgb)
             cv2.imwrite(str(d / "depth.png"), depth)
             cv2.imwrite(str(d / "overlay.png"), overlay)
-            np.save(d / "masks.npy", np.array(masks, dtype=bool) if masks else np.zeros((0, *s.shape), bool))
+            # 圧縮して保存（非圧縮だと 1 フレーム約 5MB になり，連続運転でディスクを使い切る）
+            np.savez_compressed(d / "masks.npz",
+                                masks=np.array(masks, dtype=bool) if masks else np.zeros((0, *s.shape), bool))
             with open(d / "poses.json", "w") as f:
                 json.dump(dict(seg_ms=t_seg * 1000, pose_ms=t_pose * 1000, parts=rows), f, indent=1)
         return True
@@ -258,6 +264,7 @@ class LivePoseNode(Node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="hier_improved_v2", choices=list(METHODS))
+    ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")
     ap.add_argument("--max-frames", type=int, default=0, help=">0 ならこの回数推定して終了（動作確認用）")
     args, ros_args = ap.parse_known_args()

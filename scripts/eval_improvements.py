@@ -133,7 +133,7 @@ def run(variant_keys, configs):
                 depth_cache[dkey] = (d, (time.perf_counter() - t0) * 1000)
             d, t_depth = depth_cache[dkey]
             pts, vi, vu, vv = depth_to_points(d, s, cfg)
-            kept = filter_fragments(frags, s.rgb, vu, vv, vi, cfg)
+            kept = filter_fragments(frags, s.rgb, vu, vv, vi, cfg, pts=pts)
             tkey = ("table",) + dkey
             if tkey not in depth_cache:   # 内訳用の断片対の特徴（深度ごとに1回）
                 depth_cache[tkey] = cm.pair_table(kept, pts, vi, vu, vv, replace(cfg, use_convexity=True),

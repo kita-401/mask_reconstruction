@@ -38,6 +38,6 @@ class MaskReconstructor:
             fragments = self.fragments(sample)
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
         pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
-        kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg)
+        kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg, pts=pts)
         cam = (sample.fx, sample.fy, sample.cx, sample.cy)
         return merge_fragments(kept, pts, valid_idx, v_u, v_v, self.cfg, cam=cam)
