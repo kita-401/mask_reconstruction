@@ -3,11 +3,12 @@
     python scripts/run_masknet_pose.py                         # hier_improved_v2 のマスク
     python scripts/run_masknet_pose.py --masks hier_improved_v2 --configs 1 9
 
-手法（どれも同じマスク・同じ計測点群を使う）
-  svd_icp       : 既存の SVD+ICP（カメラ側半分のモデル，MaskNet なし）．比較の基準
-  masknet_svd   : MaskNet でモデルを削る → 削ったモデルと計測点群の主成分で回転（符号探索）→ ICP
-                  （masksvd_exp の「中心化＋半径1に拡大＋符号探索＋ICP 1cm」）
-  masknet_refine: 既存 SVD+ICP の姿勢でモデルを重ねる → MaskNet で削る → 削ったモデルで ICP をかけ直す
+手法（どれも同じマスクを使う．位置合わせの前に，マスク領域の点群とモデル点群を同じ辺長 VOXEL のボクセルで間引く）
+  svd_icp_2mm  : 参考．既存の SVD+ICP（カメラ側半分のモデル，ボクセル 2mm の既定設定）
+  svd_icp      : 既存の SVD+ICP（カメラ側半分のモデル），ボクセル 5mm
+  full_svd     : MaskNet なし．全周モデルのまま SVD（符号探索）→ ICP（MaskNet の効果を切り分けるため）
+  masknet_svd  : MaskNet で全周モデルを計測点群に合わせて削る → SVD（符号探索）→ ICP
+                 （masksvd_exp の「中心化＋半径1に拡大＋符号探索＋ICP 1cm」）
 
 評価（真値姿勢がないため，masksvd_exp と同じ基準）
   FSV  : 全周モデルのうちカメラ側を向く面の点が，計測深度より 10mm 以上手前に来る割合（<5% 成功，>20% 失敗）
@@ -39,33 +40,40 @@ from pose_estimation.frames import load_frame, load_masks  # noqa: E402
 from pose_estimation.pointcloud import load_model, mask_to_points, preprocess  # noqa: E402
 from pose_estimation.visualization import draw_poses  # noqa: E402
 
+VOXEL = 0.005                     # [m] 計測点群・モデル点群に共通のボクセルの辺長
 BASE = MaskSVDConfig()
-DIRECT = replace(BASE, normalize_scale=True, center_inputs=True, flip_mode="search", icp_threshold=0.01)
-REFINE = replace(BASE, normalize_scale=True, icp_threshold=0.01, icp_iter=30)
+DIRECT = replace(BASE, normalize_scale=True, center_inputs=True, flip_mode="search", icp_threshold=0.01,
+                 model_voxel=VOXEL)
 EVAL_MODEL = BASE.model_path      # 評価は全手法とも同じ全周モデルで行う
-METHODS = ("svd_icp", "masknet_svd", "masknet_refine")
+METHODS = ("svd_icp_2mm", "svd_icp", "full_svd", "masknet_svd")
+STATS = {"n_measured": [], "n_model": [], "measured_ge_model": 0}
 
 
-def estimate_all(masks, frame, pc, svd_icp, half, direct, refine):
-    """マスクごとに3手法の姿勢．戻り値: {手法: [(T or None, 時間[s], 計測点群)]}"""
+def estimate_all(masks, frame, pcs, svd_icp, halves, masknet):
+    """マスクごとに各手法の姿勢．戻り値: {手法: [(T or None, 時間[s], 計測点群)]}"""
     out = {m: [] for m in METHODS}
+    full = np.asarray(masknet.model.voxel_down_sample(VOXEL).points)
     for mk in masks:
-        p = mask_to_points(mk, frame, pc)
-        if len(p) < pc.min_points:
+        p_raw = mask_to_points(mk, frame, pcs["5mm"])
+        if len(p_raw) < pcs["5mm"].min_points:
             for m in METHODS:
                 out[m].append((None, 0.0, None))
             continue
-        p = preprocess(p, pc)
-        t0 = time.perf_counter()
-        T0 = svd_icp(half, p).T_model_to_cam
-        t_svd = time.perf_counter() - t0
-        out["svd_icp"].append((T0, t_svd, p))
-        t0 = time.perf_counter()
-        T1 = direct.register(p)
-        out["masknet_svd"].append((T1, time.perf_counter() - t0, p))
-        t0 = time.perf_counter()
-        T2 = refine.refine(p, T0)
-        out["masknet_refine"].append((T2, t_svd + time.perf_counter() - t0, p))   # SVD+ICP の時間を含む
+        p2 = preprocess(p_raw, pcs["2mm"])
+        p = preprocess(p_raw, pcs["5mm"])
+        STATS["n_measured"].append(len(p))
+        STATS["n_model"].append(len(full))
+        STATS["measured_ge_model"] += int(len(p) >= len(full))
+
+        def run(name, fn, pts):
+            t0 = time.perf_counter()
+            T = fn()
+            out[name].append((T, time.perf_counter() - t0, pts))
+
+        run("svd_icp_2mm", lambda: svd_icp["2mm"](halves["2mm"], p2).T_model_to_cam, p2)
+        run("svd_icp", lambda: svd_icp["5mm"](halves["5mm"], p).T_model_to_cam, p)
+        run("full_svd", lambda: masknet.register(p, template=full), p)
+        run("masknet_svd", lambda: masknet.register(p), p)
     return out
 
 
@@ -75,10 +83,11 @@ def main():
     ap.add_argument("--configs", type=int, nargs="+", default=list(range(1, 11)))
     args = ap.parse_args()
 
-    pc = PoseConfig()
-    svd_icp = SVDICPRegistration(pc)
-    half = load_model(pc)
-    direct, refine = MaskSVD(DIRECT), MaskSVD(REFINE)
+    pcs = {"2mm": PoseConfig(), "5mm": replace(PoseConfig(), voxel_size=VOXEL)}
+    svd_icp = {k: SVDICPRegistration(c) for k, c in pcs.items()}
+    halves = {k: load_model(c) for k, c in pcs.items()}
+    pc = pcs["5mm"]
+    masknet = MaskSVD(DIRECT)
     full_vis = np.asarray(o3d.io.read_point_cloud(EVAL_MODEL).voxel_down_sample(0.003).points)
     full_adds = np.asarray(o3d.io.read_point_cloud(EVAL_MODEL).voxel_down_sample(0.002).points)
     out_root = POSE_RESULTS_DIR.parent / "pose_masknet" / args.masks
@@ -89,8 +98,8 @@ def main():
         gt = load_masks(MASKS_DIR / "gt", i)
         frame = load_frame(i, masks[0].shape)
         depth_m = frame.depth.astype(np.float64) / 1000.0
-        est = estimate_all(masks, frame, pc, svd_icp, half, direct, refine)
-        est_gt = estimate_all(gt, frame, pc, svd_icp, half, direct, refine) if gt is not None else None
+        est = estimate_all(masks, frame, pcs, svd_icp, halves, masknet)
+        est_gt = estimate_all(gt, frame, pcs, svd_icp, halves, masknet) if gt is not None else None
         match = match_masks(masks, gt) if gt is not None else [-1] * len(masks)
         for m in METHODS:
             poses = []
@@ -106,13 +115,18 @@ def main():
                 rows[m].append(r)
             d = out_root / m
             d.mkdir(parents=True, exist_ok=True)
-            vis_model = load_model(pc) if m == "svd_icp" else full_vis
+            vis_model = halves["2mm"] if m.startswith("svd_icp") else full_vis
             cv2.imwrite(str(d / f"config{i}.png"), draw_poses(frame, vis_model, poses, masks))
         print(f"config {i}: {len(masks)} masks", flush=True)
 
-    names = {"svd_icp": "既存 SVD+ICP（半分モデル）", "masknet_svd": "MaskNet で削る → SVD → ICP",
-             "masknet_refine": "SVD+ICP → MaskNet で削る → ICP"}
-    lines = [f"マスク: {args.masks}（{len(rows['svd_icp'])} 個）",
+    names = {"svd_icp_2mm": "参考：既存 SVD+ICP（半分モデル，ボクセル 2mm）",
+             "svd_icp": "既存 SVD+ICP（半分モデル，5mm）",
+             "full_svd": "MaskNet なし：全周モデル → SVD → ICP（5mm）",
+             "masknet_svd": "MaskNet で削る → SVD → ICP（5mm）"}
+    nm, nd = np.array(STATS["n_measured"]), np.array(STATS["n_model"])
+    lines = [f"マスク: {args.masks}（{len(rows['svd_icp'])} 個）．5mm ボクセル後の点数：計測 中央値 {np.median(nm):.0f}，"
+             f"モデル {nd[0]}．計測点数 ≥ モデル点数（MaskNet の入力で計測点を間引く）: "
+             f"{STATS['measured_ge_model']}/{len(nm)}（正解マスク分を含む）",
              "| 手法 | 成功 FSV<5% | 失敗 FSV>20% | fitness | ADD-S 中央値 [mm] | ADD-S<5mm | 時間 [ms/個] |",
              "|---|---|---|---|---|---|---|"]
     summary = {}
