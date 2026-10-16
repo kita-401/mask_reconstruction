@@ -132,3 +132,42 @@ class Config:
     absorb_small: bool = False
     absorb_area: int = 5000            # [px] これ未満のまとまりを吸収の対象にする
     absorb_depth_thresh: float = 0.008  # [m] 吸収先との境界の深度差の上限
+
+    # ===== 2026-10-16 追加の改善（既定はすべてオフ．オフなら上の挙動と同一） =====
+    # --- 改善1：LingBot-Depth を使わない深度（depth_refine=False のときだけ有効） ---
+    # True : 時間方向メディアン（複数フレームがあれば）または有効画素だけの空間メディアン．欠損は補完しない
+    # False: 既存の remove_depth_outliers（飛び値除去のみ）
+    depth_temporal: bool = False
+    depth_temporal_frames: int = 5      # 取得・使用するフレーム数 N（N=1 なら空間メディアンのみ）
+    depth_temporal_min_valid: float = 0.5  # 有効フレームがこの割合未満の画素は欠損
+    depth_spatial_ksize: int = 5        # N=1 のときの空間メディアンの窓 [px]（有効画素だけで計算）
+
+    # --- 改善2：CADサイズによる cannot-link（制約付き平均連結クラスタリング，constrained_merging.py） ---
+    use_size_constraint: bool = False
+    size_margin: float = 0.15           # m．(1+m)×CAD値を超える統合を禁止
+    size_percentile: float = 2.0        # 寸法・最大径は [p, 100-p] パーセンタイルの範囲で計算
+    cad_proj_rotations: int = 500       # A_cad を求めるランダム回転の数
+    cad_proj_seed: int = 0
+    # 自前の平均連結を使う（制約オフでも True にすれば自前実装．テストで scipy と比較する）
+    own_linkage: bool = False
+
+    # --- 改善3：法線の凸性（LCCP型）による境界判定 ---
+    use_convexity: bool = False
+    no_force_connect: bool = False      # 「段差 < bound_depth_thresh → connected_dist に上書き」をやめる
+    normal_window: int = 5              # [px] 深度画像上の法線の差分窓
+    convex_samples: int = 30            # 境界上のサンプル数 K
+    convex_inset: int = 3               # [px] 境界から内側へずらす距離
+    flat_angle: float = 15.0            # [deg] 法線のなす角がこれ未満なら平坦（凸扱い）
+    concave_ratio_thresh: float = 0.5   # τ_r
+    concave_angle_thresh: float = -1.0  # τ_a [deg]．負なら CAD の最大凹角 θ_cad_max + concave_angle_margin
+    concave_angle_margin: float = 10.0  # [deg]
+    convex_bonus: float = 0.0           # β．凸・平坦な境界の距離から引く量（0 なら距離行列から自動で提案値）
+    concave_penalty: float = 10.0       # 凹と判定した境界に足す量（既存の adjacent_penalty と同じ）
+    cad_concave_pair_dist: tuple = (0.004, 0.010)  # [m] CAD上で凹凸を調べる点対の距離（境界をはさむ2点の間隔）
+    cad_concave_percentile: float = 99.0  # θ_cad_max として使う凹角分布のパーセンタイル
+
+    # --- 改善5：統合マスクの後処理（深度が連続な範囲だけで closing と穴埋め） ---
+    post_close: bool = False
+    post_close_ksize: int = 7           # [px]
+    post_depth_thresh: float = 0.005    # [m] 局所平均深度との差がこれ未満の画素だけ加える
+    cad_cache_dir: str = str(RESULTS_DIR / "cad_prior")

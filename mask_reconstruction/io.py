@@ -19,6 +19,7 @@ class Sample:
     fy: float
     cx: float
     cy: float
+    depth_frames: list = None  # 時間メディアン用の複数フレーム（real_depth{sfx}_t{k}.png があれば）
 
     @property
     def shape(self):
@@ -75,7 +76,15 @@ def load_sample(idx, cfg=Config(), data_dir=DATA_DIR):
     with open(p["intrinsics"]) as f:
         cam = json.load(f)
     ref_w, ref_h = cfg.intrinsics_ref_size
+    frames = []
+    for k in range(cfg.depth_temporal_frames):
+        fp = p["depth"].with_name(f"{p['depth'].stem}_t{k}.png")
+        if not fp.exists():
+            break
+        frames.append(cv2.resize(cv2.imread(str(fp), cv2.IMREAD_UNCHANGED), (w_in, h_in),
+                                 interpolation=cv2.INTER_NEAREST))
     return Sample(
+        depth_frames=frames or None,
         idx=idx,
         rgb=cv2.resize(rgb, (w_in, h_in)),
         depth=cv2.resize(depth, (w_in, h_in), interpolation=cv2.INTER_NEAREST),

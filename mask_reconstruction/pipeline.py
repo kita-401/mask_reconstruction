@@ -11,6 +11,16 @@ from .fragments import filter_fragments, run_fastsam
 from .merging import merge_fragments
 
 
+def compute_depth(lingbot, sample, cfg: Config, device):
+    """設定に応じた深度 [mm]：LingBot-Depth / 時間（空間）メディアン（改善1）/ 飛び値除去のみ．"""
+    if cfg.depth_refine:
+        return refine_depth(lingbot, sample, cfg, device)
+    if cfg.depth_temporal:
+        from .depth_temporal import prepare_depth
+        return prepare_depth(sample, cfg)
+    return remove_depth_outliers(sample.depth, cfg)
+
+
 class MaskReconstructor:
     def __init__(self, cfg: Config = Config(), device=None):
         self.cfg = cfg
@@ -26,8 +36,7 @@ class MaskReconstructor:
         """マスクを再構築する．fragments を渡すと FastSAM の推論を省略する．"""
         if fragments is None:
             fragments = self.fragments(sample)
-        depth_mm = refine_depth(self.lingbot, sample, self.cfg, self.device) if self.cfg.depth_refine \
-            else remove_depth_outliers(sample.depth, self.cfg)
+        depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
         pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
         kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg)
         cam = (sample.fx, sample.fy, sample.cx, sample.cy)
