@@ -181,6 +181,10 @@ class Config:
     # [px] 差分をとる窓（convexity.organized_normals）．hier_improved_v2 の10配置で 5/7/9 を比べ，9 が従来と同等以上
     fast_normal_window: int = 9
 
+    # --- 高速化：重い基本処理を C++（cpp/mr_kernels.cpp）で計算する．結果は Python 版と同じ ---
+    # 断片の点の取り出し，断片の組ごとの隣接・深度差・法線角・重なり，深度画像上の法線，断片フィルタの集計
+    use_cpp: bool = False
+
     # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
     # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
     use_plane_removal: bool = False

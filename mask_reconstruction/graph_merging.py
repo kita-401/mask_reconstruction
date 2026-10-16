@@ -50,10 +50,15 @@ def _normal_image(pts, valid_idx, v_u, v_v, shape, cfg):
     """
     if cfg.fast_normals:
         def make_fast():
+            if cfg.use_cpp:   # 同じ法線を C++ で計算する
+                from . import cpp_kernels as ck
+                P, V = ck.point_image(pts, valid_idx, v_u, v_v, shape)
+                return ck.organized_normals(P, V, cfg.fast_normal_window)[0]
             from .convexity import organized_normals, point_image
             P, V = point_image(pts, valid_idx, v_u, v_v, shape)
             return organized_normals(P, V, cfg.fast_normal_window)[0]
-        return POINT_CACHE.get(pts, valid_idx, ("normals_fast", shape, cfg.fast_normal_window), make_fast)
+        return POINT_CACHE.get(pts, valid_idx, ("normals_fast", shape, cfg.fast_normal_window, cfg.use_cpp),
+                               make_fast)
 
     def make():
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
@@ -158,6 +163,9 @@ def attach_small_fragments(clusters, smalls, pts, valid_idx, v_u, v_v, cfg: Conf
       （割り当て済みの小断片を介して，さらに別の小断片がつながることもある）
     - どこにも割り当てられなかった小断片は stage2_keep_unassigned=False なら捨てる
     """
+    if cfg.use_cpp:   # 同じ割り当てを C++ の基本処理で計算する（merging_cpp.py）
+        from .merging_cpp import attach_small_fragments_cpp
+        return attach_small_fragments_cpp(clusters, smalls, pts, valid_idx, v_u, v_v, cfg)
     kernel = np.ones((cfg.adjacency_kernel, cfg.adjacency_kernel), np.uint8)
     clusters = [c.copy() for c in clusters]
     if not clusters:

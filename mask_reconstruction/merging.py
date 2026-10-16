@@ -115,6 +115,9 @@ def distance_matrix(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     - それ以外 → 重心間距離 + (主軸の角度差 + 主軸と重心方向のずれ) * L_cad
                  隣接していて深度が不連続なら adjacent_penalty を加算
     """
+    if cfg.use_cpp:   # 同じ距離行列を C++ の基本処理で計算する（merging_cpp.py）
+        from .merging_cpp import distance_matrix_cpp
+        return distance_matrix_cpp(masks, pts, valid_idx, v_u, v_v, cfg)
     n = len(masks)
     centers, axes = fragment_pca(masks, pts, valid_idx, v_u, v_v)
     if cfg.use_cylinder_axis:
@@ -308,12 +311,16 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     Z = linkage(squareform(D, checks=False), method=cfg.linkage_method)
     if cfg.use_cad_constraint:
         rng = np.random.default_rng(0)
-        frag_pts = []
-        for m in masks:
-            p = pts[valid_idx[m[v_v, v_u]]]
-            if len(p) > cfg.max_points_per_fragment:
-                p = p[rng.choice(len(p), cfg.max_points_per_fragment, replace=False)]
-            frag_pts.append(p)
+        if cfg.use_cpp:
+            from .merging_cpp import fragment_points_subsampled
+            frag_pts = fragment_points_subsampled(masks, pts, valid_idx, v_u, v_v, cfg, rng)
+        else:
+            frag_pts = []
+            for m in masks:
+                p = pts[valid_idx[m[v_v, v_u]]]
+                if len(p) > cfg.max_points_per_fragment:
+                    p = p[rng.choice(len(p), cfg.max_points_per_fragment, replace=False)]
+                frag_pts.append(p)
         labels = cad_constrained_cut(Z, D, frag_pts, cfg)
     else:
         labels = fcluster(Z, t=cfg.cluster_thresh, criterion="distance")

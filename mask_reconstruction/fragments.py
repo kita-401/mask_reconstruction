@@ -53,6 +53,20 @@ def filter_fragments(masks, rgb, v_u, v_v, valid_idx, cfg: Config, pts=None):
         n, d = fit_plane(pts[valid_idx], cfg)
         on_plane = np.zeros(rgb.shape[:2], bool)
         on_plane[v_v, v_u] = np.abs(pts[valid_idx] @ n + d) < cfg.plane_dist_thresh
+    if cfg.use_cpp and masks:   # 同じ判定を C++ の集計で行う
+        from . import cpp_kernels as ck
+        has_point = np.zeros(rgb.shape[:2], bool)
+        has_point[v_v, v_u] = True
+        imgs = [np.ones(rgb.shape[:2], bool), is_black, has_point] + ([on_plane] if on_plane is not None else [])
+        cnt = ck.mask_counts(ck.stack_masks(masks), imgs)
+        kept = []
+        for m, c in zip(masks, cnt):
+            if c[1] / c[0] > cfg.max_black_ratio or c[2] <= cfg.min_fragment_points:
+                continue
+            if on_plane is not None and c[3] / c[2] > cfg.plane_max_ratio:
+                continue
+            kept.append(m)
+        return kept
     kept = []
     for m in masks:
         if np.sum(is_black[m]) / np.sum(m) > cfg.max_black_ratio:

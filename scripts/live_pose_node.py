@@ -78,10 +78,12 @@ class LivePoseNode(Node):
                                  qos_profile_sensor_data)
         self.create_subscription(CameraInfo, "/camera/color/camera_info", self.on_info, qos_profile_sensor_data)
         self.get_logger().info(f"セグメンテーション（{args.method}）と姿勢推定のモデルを読み込んでいます…")
+        from dataclasses import replace
         cfg = METHODS[args.method]
         if not args.no_plane_removal:   # 黒いトレイ以外の背景（机など）を平面として除く
-            from dataclasses import replace
             cfg = replace(cfg, use_plane_removal=True)
+        if not args.no_cpp:             # 重い基本処理を C++ で（結果は Python 版と同じ）
+            cfg = replace(cfg, use_cpp=True)
         self.recon = MaskReconstructor(cfg)
         self.pc = PoseConfig()
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
@@ -214,6 +216,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="hier_improved_v2_fast", choices=list(METHODS))
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
+    ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")
     ap.add_argument("--max-frames", type=int, default=0, help=">0 ならこの回数推定して終了（動作確認用）")
