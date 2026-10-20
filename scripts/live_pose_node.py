@@ -132,7 +132,7 @@ class LivePoseNode(Node):
             from masksvd_exp.masksvd import MaskSVD, MaskSVDConfig
             self.masknet = MaskSVD(replace(MaskSVDConfig(model_path=model_path), normalize_scale=True,
                                            center_inputs=True, flip_mode="search", icp_threshold=0.01,
-                                           model_voxel=self.pc.voxel_size))
+                                           model_voxel=args.model_voxel if args.model_voxel > 0 else self.pc.voxel_size))
         from mask_reconstruction.cad_prior import load_cad_prior
         self.cad = load_cad_prior(cfg)   # 部品1個の大きさ（CAD から自動で求めた L1〜L3，最大の正射影面積）
         self.model_vis = self.model[::3]
@@ -384,6 +384,8 @@ def main():
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
     ap.add_argument("--voxel", type=float, default=0.002,
                     help="位置合わせの前に計測点群とモデルを間引くボクセルの辺長 [m]")
+    ap.add_argument("--model-voxel", type=float, default=0.0,
+                    help="MaskNet に入れるモデルだけを間引くボクセルの辺長 [m]（0 なら --voxel と同じ）")
     ap.add_argument("--registration", choices=["visible", "masknet"], default="visible",
                     help="visible: 全周モデルの見える面だけで SVD+ICP（GPU）/ masknet: MaskNet で削ったモデルで SVD+ICP")
     ap.add_argument("--no-visible-only", action="store_true",
