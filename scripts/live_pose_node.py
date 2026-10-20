@@ -58,6 +58,25 @@ def make_sample(rgb, depth, intr, patch=14):
                   fx=intr["fx"] * sx, fy=intr["fy"] * sy, cx=intr["cx"] * sx, cy=intr["cy"] * sy)
 
 
+def points_msg(xyz, bgr, stamp):
+    """点 (N, 3) [m] と色 (N, 3) BGR の点群メッセージ（カメラ座標）．"""
+    import array
+    from sensor_msgs.msg import PointField
+    from std_msgs.msg import Header
+    c = bgr.astype(np.uint32)
+    arr = np.zeros(len(xyz), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"), ("rgb", "u4")])
+    arr["x"], arr["y"], arr["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    arr["rgb"] = (c[:, 2] << 16) | (c[:, 1] << 8) | c[:, 0] if len(c) else 0
+    m = PointCloud2()
+    m.header = Header(stamp=stamp, frame_id=CAM_FRAME)
+    m.height, m.width = 1, len(arr)
+    m.fields = [PointField(name=n, offset=o, datatype=t, count=1)
+                for n, o, t in (("x", 0, 7), ("y", 4, 7), ("z", 8, 7), ("rgb", 12, 6))]
+    m.is_bigendian, m.point_step, m.row_step, m.is_dense = False, 16, 16 * len(arr), True
+    m.data = array.array("B", arr.tobytes())
+    return m
+
+
 def seg_color(i):
     """部品 i の表示色（BGR）．色相を黄金比ずつ飛ばして選ぶので，番号が隣でも色が大きく変わる．"""
     hsv = np.uint8([[[int(180 * ((i * 0.6180339887) % 1.0)), 230, 255]]])
@@ -73,6 +92,8 @@ class LivePoseNode(Node):
         self.pub_models = self.create_publisher(MarkerArray, "/pose/models", 2)
         self.pub_masks = self.create_publisher(Image, "/pose/masks", 2)                 # セグメンテーション画像
         self.pub_seg_cloud = self.create_publisher(PointCloud2, "/pose/segmented_points", 2)  # マスクごとに色分けした点群
+        self.pub_crop = self.create_publisher(PointCloud2, "/pose/masknet_models", 2)     # MaskNet で削ったモデル
+        self.pub_meas = self.create_publisher(PointCloud2, "/pose/measured_points", 2)    # 位置合わせに使った計測点群
         self.poses = []                # [(name, T)]
         self.pose_lock = threading.Lock()
         self.create_timer(0.1, self.publish_tf)   # 最新の姿勢を 10Hz で配信し続ける（RViz で古くならないように）
@@ -190,9 +211,12 @@ class LivePoseNode(Node):
         t2 = time.perf_counter()
         if self.masknet is not None:
             from pose_estimation.registration_svd import RegistrationResult
-            results = {i: RegistrationResult(T_model_to_cam=self.masknet.register(p), svd_fitness=float("nan"),
-                                             icp_fitness=float("nan"), icp_rmse=float("nan"), flip=[])
-                       for i, p in clouds.items()}
+            results, crops = {}, {}
+            for i, p in clouds.items():
+                crops[i] = self.masknet.crop_model(p)          # MaskNet で削ったモデル（モデル座標）
+                T = self.masknet.register(p, template=crops[i])  # register(p) と同じ（削る処理を分けただけ）
+                results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=float("nan"),
+                                                icp_fitness=float("nan"), icp_rmse=float("nan"), flip=[])
         elif isinstance(self.reg, GPUBatchRegistration):
             results = dict(zip(clouds, self.reg.batch(self.model, list(clouds.values()))))
         else:
@@ -223,6 +247,8 @@ class LivePoseNode(Node):
         self.pub_overlay.publish(image_msg(overlay, stamp))
         self.publish_segmentation(s, masks, skipped, stamp, oversized)
         self.publish_models(named, len(poses), stamp)
+        if self.masknet is not None:
+            self.publish_masknet(crops, clouds, poses, stamp)
         t_pub = time.perf_counter() - t_pub0
         lt = getattr(self.recon, "last_times", {})
         self.get_logger().info(
@@ -312,6 +338,24 @@ class LivePoseNode(Node):
         depth = np.where(covered, s.depth, 0).astype(np.uint16)   # 大きすぎるマスクの点は出さない
         intr = dict(fx=s.fx, fy=s.fy, cx=s.cx, cy=s.cy)
         self.pub_seg_cloud.publish(cloud_msg(label, depth, intr, stamp, stride=2))
+
+    def publish_masknet(self, crops, clouds, poses, stamp):
+        """MaskNet で削ったモデル（推定姿勢でカメラ座標に置き，部品の色）と，位置合わせに使った計測点群（白）．
+
+        2つが重なっていれば，削ったモデルの形が計測点群と一致している．
+        """
+        pts, cols = [], []
+        for i, crop in crops.items():
+            T = poses[i]
+            if T is None:
+                continue
+            pts.append(crop @ T[:3, :3].T + T[:3, 3])
+            cols.append(np.tile(np.array(seg_color(i), np.uint8), (len(crop), 1)))
+        self.pub_crop.publish(points_msg(np.vstack(pts) if pts else np.zeros((0, 3)),
+                                         np.vstack(cols) if cols else np.zeros((0, 3), np.uint8), stamp))
+        meas = list(clouds.values())
+        m = np.vstack(meas) if meas else np.zeros((0, 3))
+        self.pub_meas.publish(points_msg(m, np.full((len(m), 3), 255, np.uint8), stamp))
 
     def publish_models(self, named, n, stamp):
         arr = MarkerArray()
