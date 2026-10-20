@@ -103,6 +103,14 @@ class LivePoseNode(Node):
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
+        self.masknet = None
+        if args.registration == "masknet":
+            # 全周モデルを MaskNet で計測点群に合わせて削り，削ったモデルで SVD（符号探索）+ ICP（masksvd_exp）．
+            # モデルは計測点群と同じボクセルで間引く．masksvd_exp で最も良かった設定
+            from masksvd_exp.masksvd import MaskSVD, MaskSVDConfig
+            self.masknet = MaskSVD(replace(MaskSVDConfig(model_path=model_path), normalize_scale=True,
+                                           center_inputs=True, flip_mode="search", icp_threshold=0.01,
+                                           model_voxel=self.pc.voxel_size))
         from mask_reconstruction.cad_prior import load_cad_prior
         self.cad = load_cad_prior(cfg)   # 部品1個の大きさ（CAD から自動で求めた L1〜L3，最大の正射影面積）
         self.model_vis = self.model[::3]
@@ -179,7 +187,12 @@ class LivePoseNode(Node):
                 skipped.append(i)
         t_prep = time.perf_counter() - t1
         t2 = time.perf_counter()
-        if isinstance(self.reg, GPUBatchRegistration):
+        if self.masknet is not None:
+            from pose_estimation.registration_svd import RegistrationResult
+            results = {i: RegistrationResult(T_model_to_cam=self.masknet.register(p), svd_fitness=float("nan"),
+                                             icp_fitness=float("nan"), icp_rmse=float("nan"), flip=[])
+                       for i, p in clouds.items()}
+        elif isinstance(self.reg, GPUBatchRegistration):
             results = dict(zip(clouds, self.reg.batch(self.model, list(clouds.values()))))
         else:
             results = {i: self.reg(self.model, p) for i, p in clouds.items()}
@@ -324,6 +337,8 @@ def main():
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
     ap.add_argument("--model", choices=["full", "half"], default="full",
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
+    ap.add_argument("--registration", choices=["visible", "masknet"], default="visible",
+                    help="visible: 全周モデルの見える面だけで SVD+ICP（GPU）/ masknet: MaskNet で削ったモデルで SVD+ICP")
     ap.add_argument("--no-visible-only", action="store_true",
                     help="全周モデルでも，見える面だけを対応先にする処理をしない")
     ap.add_argument("--max-size-ratio", type=float, default=0.3,
