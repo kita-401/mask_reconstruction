@@ -33,11 +33,28 @@ class MaskReconstructor:
         return run_fastsam(self.fastsam, sample.rgb, self.cfg, self.device)
 
     def reconstruct(self, sample, fragments=None):
-        """マスクを再構築する．fragments を渡すと FastSAM の推論を省略する．"""
+        """マスクを再構築する．fragments を渡すと FastSAM の推論を省略する．
+
+        各ステップの時間 [s] を self.last_times に残す（処理には影響しない）．
+        """
+        import time
+        sync = torch.cuda.synchronize if torch.cuda.is_available() else (lambda: None)
+        times = {}
+        t = time.perf_counter()
         if fragments is None:
             fragments = self.fragments(sample)
+        sync()
+        times["FastSAM"], t = time.perf_counter() - t, time.perf_counter()
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
+        sync()
+        times["depth"], t = time.perf_counter() - t, time.perf_counter()
         pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
+        times["points"], t = time.perf_counter() - t, time.perf_counter()
         kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg, pts=pts)
+        times["filter"], t = time.perf_counter() - t, time.perf_counter()
         cam = (sample.fx, sample.fy, sample.cx, sample.cy)
-        return merge_fragments(kept, pts, valid_idx, v_u, v_v, self.cfg, cam=cam)
+        merged = merge_fragments(kept, pts, valid_idx, v_u, v_v, self.cfg, cam=cam)
+        times["merge"] = time.perf_counter() - t
+        times["n_fragments"], times["n_kept"] = len(fragments), len(kept)
+        self.last_times = times
+        return merged

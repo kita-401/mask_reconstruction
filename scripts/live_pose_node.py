@@ -152,9 +152,11 @@ class LivePoseNode(Node):
             got, self.latest = self.latest, None   # 同じ画像で2回推定しない
         if got is None or self.intr is None:
             return False
+        t_all0 = time.perf_counter()
         rgb, depth = image_from_msg(got[0]), image_from_msg(got[1])
         t0 = time.perf_counter()
         s = make_sample(rgb, depth, self.intr)
+        t_conv = time.perf_counter() - t_all0
         masks = self.recon.reconstruct(s)
         t_seg = time.perf_counter() - t0
         K = np.array([[s.fx, 0, s.cx], [0, s.fy, s.cy], [0, 0, 1]])
@@ -197,6 +199,7 @@ class LivePoseNode(Node):
             self.poses = named
         self.publish_tf()
         stamp = self.get_clock().now().to_msg()
+        t_pub0 = time.perf_counter()
         overlay = draw_poses(frame, self.model, poses, masks)   # 色は RViz のモデル表示と同じ（部品の番号順）
         for i in skipped + oversized:   # 位置合わせしなかった部品は輪郭を灰色で上書き
             cnts, _ = cv2.findContours(masks[i].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -206,6 +209,15 @@ class LivePoseNode(Node):
         self.pub_overlay.publish(image_msg(overlay, stamp))
         self.publish_segmentation(s, masks, skipped, stamp, oversized)
         self.publish_models(named, len(poses), stamp)
+        t_pub = time.perf_counter() - t_pub0
+        lt = getattr(self.recon, "last_times", {})
+        self.get_logger().info(
+            f"#{k} 内訳[ms]: 画像変換 {t_conv*1000:.0f} / FastSAM {lt.get('FastSAM', 0)*1000:.0f} / "
+            f"深度補完 {lt.get('depth', 0)*1000:.0f} / 点群化 {lt.get('points', 0)*1000:.0f} / "
+            f"断片フィルタ {lt.get('filter', 0)*1000:.0f}（断片 {lt.get('n_fragments', 0)}→{lt.get('n_kept', 0)}） / "
+            f"統合 {lt.get('merge', 0)*1000:.0f} / 姿勢用点群化 {t_prep*1000:.0f} / 位置合わせ {t_reg*1000:.0f} / "
+            f"評価 {(t_pose - t_prep - t_reg)*1000:.0f} / 表示の配信 {t_pub*1000:.0f} / "
+            f"合計 {(time.perf_counter() - t_all0)*1000:.0f}")
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個，"
                                f"大きすぎて推定しない {len(oversized)} 個）"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
