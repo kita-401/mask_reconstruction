@@ -97,7 +97,8 @@ class LivePoseNode(Node):
         # 位置合わせ・点数の比のモデル：full＝全周（既定），half＝カメラ側半分（従来）
         model_path = str(Path(PoseConfig().model_path).with_name(f"t_pipe_{args.model}.pcd"))
         # 全周モデルでは，その姿勢でカメラを向いている面だけを対応先にする（裏面に合わせる誤りを防ぐ）
-        self.pc = PoseConfig(model_path=model_path, ratio_model_path=model_path,
+        # voxel_size：計測点群・モデル（位置合わせ・MaskNet・点数の比）に共通のボクセルの辺長
+        self.pc = PoseConfig(model_path=model_path, ratio_model_path=model_path, voxel_size=args.voxel,
                              min_model_ratio=args.min_model_ratio,
                              icp_visible_only=args.model == "full" and not args.no_visible_only)
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
@@ -337,6 +338,8 @@ def main():
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
     ap.add_argument("--model", choices=["full", "half"], default="full",
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
+    ap.add_argument("--voxel", type=float, default=0.002,
+                    help="位置合わせの前に計測点群とモデルを間引くボクセルの辺長 [m]")
     ap.add_argument("--registration", choices=["visible", "masknet"], default="visible",
                     help="visible: 全周モデルの見える面だけで SVD+ICP（GPU）/ masknet: MaskNet で削ったモデルで SVD+ICP")
     ap.add_argument("--no-visible-only", action="store_true",
