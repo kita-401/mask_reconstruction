@@ -86,8 +86,11 @@ class GPUBatchRegistration:
         return self._normals
 
     @torch.no_grad()
-    def batch(self, model_pts, measured_list):
-        """model_pts: (M, 3)，measured_list: [(N_i, 3)] → [RegistrationResult]"""
+    def batch(self, model_pts, measured_list, init=None):
+        """model_pts: (M, 3)，measured_list: [(N_i, 3)] → [RegistrationResult]
+
+        init: 部品ごとの初期姿勢（モデル → カメラの 4x4）のリスト．与えると SVD の初期候補を省き，そこから ICP する．
+        """
         if not measured_list:
             return []
         dev, cfg = self.device, self.cfg
@@ -118,6 +121,15 @@ class GPUBatchRegistration:
                 v = visible(R, t).float()
                 return (v @ tmpl_c) / v.sum(dim=1, keepdim=True).clamp(min=1)
 
+        if init is not None:
+            # モデル → カメラ の姿勢 (Rm, tm) を，中心化した計測 → 中心化したモデル の (R, t) に直す
+            Ti = torch.as_tensor(np.stack(init), dtype=torch.float32, device=dev)
+            Rm, tm = Ti[:, :3, :3], Ti[:, :3, 3]
+            R0 = Rm.transpose(1, 2)
+            t0 = (R0 @ (src_mean - tm)[..., None]).squeeze(-1) - tmpl_mean[None]
+            return self._icp_and_results(B, bid, Xc, n_pts, src_mean, tmpl_c, tmpl_sq, tmpl_mean, visible,
+                                         R0, t0, torch.zeros(B, device=dev), torch.zeros(B, dtype=torch.long, device=dev))
+
         # --- 1. SVD による初期回転（計測 → モデル） ---
         basis_t = torch.linalg.svd(tmpl_c, full_matrices=False)[2].T                 # (3, 3)
         cov = _per_part_sum(Xc[:, :, None] * Xc[:, None, :], bid, B)                  # (B, 3, 3)
@@ -145,6 +157,13 @@ class GPUBatchRegistration:
             best_t = torch.where(better[:, None], t, best_t)
             best_flip = torch.where(better, torch.full_like(best_flip, k), best_flip)
 
+        return self._icp_and_results(B, bid, Xc, n_pts, src_mean, tmpl_c, tmpl_sq, tmpl_mean, visible,
+                                     best_R, best_t, best_fit, best_flip)
+
+    def _icp_and_results(self, B, bid, Xc, n_pts, src_mean, tmpl_c, tmpl_sq, tmpl_mean, visible,
+                         best_R, best_t, best_fit, best_flip):
+        """初期姿勢 (best_R, best_t) から全部品の ICP を行い，結果を返す．"""
+        dev, cfg = self.device, self.cfg
         # --- 2. ICP（全部品を同時に．収束した部品の点は計算から外す） ---
         R_tot, t_tot = best_R.clone(), best_t.clone()
         fit = torch.zeros(B, device=dev)
@@ -163,7 +182,7 @@ class GPUBatchRegistration:
             return x, idx, inl, f, r
 
         active = torch.ones(B, dtype=torch.bool, device=dev)
-        sel = torch.ones(len(X), dtype=torch.bool, device=dev)
+        sel = torch.ones(len(Xc), dtype=torch.bool, device=dev)
         x, idx, inl, fit, rmse = evaluate(sel)
         for _ in range(cfg.icp_max_iteration):
             b = bid[sel]
