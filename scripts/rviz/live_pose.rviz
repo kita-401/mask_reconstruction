@@ -26,6 +26,17 @@ Visualization Manager:
       Size (Pixels): 2
       Color Transformer: RGB8
       Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: セグメンテーション点群
+      Enabled: true
+      Topic:
+        Value: /pose/segmented_points
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: RGB8
+      Decay Time: 0
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
@@ -40,6 +51,13 @@ Visualization Manager:
       Topic:
         Value: /pose/models
         Depth: 2
+    - Class: rviz_default_plugins/Image
+      Name: セグメンテーション
+      Enabled: true
+      Topic:
+        Value: /pose/masks
+        Depth: 2
+        Reliability Policy: Best Effort
     - Class: rviz_default_plugins/Image
       Name: 推定結果
       Enabled: true
