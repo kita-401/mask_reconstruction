@@ -212,6 +212,13 @@ class LivePoseNode(Node):
         if self.masknet is not None:
             from pose_estimation.registration_svd import RegistrationResult
             results, crops = {}, {}
+            if not hasattr(self, "_n_mask_model"):
+                v = self.masknet.cfg.model_voxel
+                self._n_mask_model = len(self.masknet.model.voxel_down_sample(v).points)
+            n_thinned = sum(len(p) >= self._n_mask_model for p in clouds.values())
+            if n_thinned:   # MaskNet は計測点と同じ数のモデル点を選ぶので，計測点の方が多いと計測点を間引いて入れる
+                self.get_logger().info(f"#{k}: 計測点がモデル（{self._n_mask_model} 点）以上で，"
+                                       f"MaskNet の入力で計測点を間引いた部品 {n_thinned}/{len(clouds)} 個")
             for i, p in clouds.items():
                 crops[i] = self.masknet.crop_model(p)          # MaskNet で削ったモデル（モデル座標）
                 T = self.masknet.register(p, template=crops[i])  # register(p) と同じ（削る処理を分けただけ）
