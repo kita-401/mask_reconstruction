@@ -234,7 +234,7 @@ def main():
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
     ap.add_argument("--no-visible-only", action="store_true",
                     help="全周モデルでも，見える面だけを対応先にする処理をしない")
-    ap.add_argument("--min-model-ratio", type=float, default=0.10,
+    ap.add_argument("--min-model-ratio", type=float, default=0.30,
                     help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
