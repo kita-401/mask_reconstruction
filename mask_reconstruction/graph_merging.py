@@ -16,7 +16,7 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from .config import Config
-from .merging import (axis_segment_distance, boundary_depth_gap, cad_extent, cylinder_axis,
+from .merging import (POINT_CACHE, axis_segment_distance, boundary_depth_gap, cad_extent, cylinder_axis,
                       principal_extent)
 from .template_fit import template_fitness
 
@@ -43,12 +43,31 @@ def _depth_image(pts, valid_idx, v_u, v_v, shape):
 
 
 def _normal_image(pts, valid_idx, v_u, v_v, shape, cfg):
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
-    pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.boundary_normal_radius, max_nn=30))
-    pcd.orient_normals_towards_camera_location(np.zeros(3))
-    N = np.zeros((*shape, 3))
-    N[v_v, v_u] = np.asarray(pcd.normals)
-    return N
+    """画素ごとの法線．同じ点群なら1回だけ計算する（読み取り専用で使うこと）．
+
+    fast_normals=True なら，Open3D の近傍探索ではなく深度画像上の差分の外積で求める（convexity.py と同じ）．
+    求められない画素は 0 ベクトル．
+    """
+    if cfg.fast_normals:
+        def make_fast():
+            if cfg.use_cpp:   # 同じ法線を C++ で計算する
+                from . import cpp_kernels as ck
+                P, V = ck.point_image(pts, valid_idx, v_u, v_v, shape)
+                return ck.organized_normals(P, V, cfg.fast_normal_window)[0]
+            from .convexity import organized_normals, point_image
+            P, V = point_image(pts, valid_idx, v_u, v_v, shape)
+            return organized_normals(P, V, cfg.fast_normal_window)[0]
+        return POINT_CACHE.get(pts, valid_idx, ("normals_fast", shape, cfg.fast_normal_window, cfg.use_cpp),
+                               make_fast)
+
+    def make():
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[valid_idx]))
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.boundary_normal_radius, max_nn=30))
+        pcd.orient_normals_towards_camera_location(np.zeros(3))
+        N = np.zeros((*shape, 3))
+        N[v_v, v_u] = np.asarray(pcd.normals)
+        return N
+    return POINT_CACHE.get(pts, valid_idx, ("normals", shape, cfg.boundary_normal_radius), make)
 
 
 def boundary_normal_angle(fa, fb, N):
@@ -144,6 +163,9 @@ def attach_small_fragments(clusters, smalls, pts, valid_idx, v_u, v_v, cfg: Conf
       （割り当て済みの小断片を介して，さらに別の小断片がつながることもある）
     - どこにも割り当てられなかった小断片は stage2_keep_unassigned=False なら捨てる
     """
+    if cfg.use_cpp:   # 同じ割り当てを C++ の基本処理で計算する（merging_cpp.py）
+        from .merging_cpp import attach_small_fragments_cpp
+        return attach_small_fragments_cpp(clusters, smalls, pts, valid_idx, v_u, v_v, cfg)
     kernel = np.ones((cfg.adjacency_kernel, cfg.adjacency_kernel), np.uint8)
     clusters = [c.copy() for c in clusters]
     if not clusters:

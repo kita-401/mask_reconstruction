@@ -1,0 +1,71 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+      Cell Size: 0.05
+      Plane Cell Count: 20
+      Plane: XY
+      Color: 160; 160; 164
+      Alpha: 0.3
+    - Class: rviz_default_plugins/PointCloud2
+      Name: 点群
+      Enabled: true
+      Topic:
+        Value: /camera/depth/points
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: RGB8
+      Decay Time: 0
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Show Arrows: false
+      Marker Scale: 0.15
+      Frame Timeout: 5
+    - Class: rviz_default_plugins/MarkerArray
+      Name: モデル
+      Enabled: true
+      Topic:
+        Value: /pose/models
+        Depth: 2
+    - Class: rviz_default_plugins/Image
+      Name: 推定結果
+      Enabled: true
+      Topic:
+        Value: /pose/overlay
+        Depth: 2
+        Reliability Policy: Best Effort
+  Global Options:
+    Fixed Frame: camera_color_optical_frame
+    Background Color: 48; 48; 48
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 0.8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0.4
+      Pitch: -1.2
+      Yaw: -1.5708
+      Target Frame: <Fixed Frame>
+Window Geometry:
+  Width: 1600
+  Height: 950

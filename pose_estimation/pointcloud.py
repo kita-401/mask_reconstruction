@@ -1,4 +1,6 @@
 """マスクと深度からインスタンスごとの計測点群を作る．"""
+from functools import lru_cache
+
 import cv2
 import numpy as np
 import open3d as o3d
@@ -28,6 +30,22 @@ def preprocess(points, cfg: PoseConfig):
     if cfg.outlier_nb > 0 and len(pcd.points) > cfg.outlier_nb:
         pcd, _ = pcd.remove_statistical_outlier(cfg.outlier_nb, cfg.outlier_std)
     return np.asarray(pcd.points)
+
+
+@lru_cache(maxsize=8)
+def ratio_model_size(path, voxel_size):
+    """点数の比に使う全周モデルを voxel_size で間引いた点数．"""
+    return len(o3d.io.read_point_cloud(path).voxel_down_sample(voxel_size).points)
+
+
+def enough_points(measured, cfg: PoseConfig):
+    """位置合わせするだけの点があるか：間引き後の計測点数 ≥ 全周モデルの点数 × min_model_ratio．
+
+    measured は preprocess の出力（cfg.voxel_size で間引いたもの）．全周モデルも同じ voxel_size で間引く．
+    """
+    if cfg.min_model_ratio <= 0:
+        return True
+    return len(measured) >= cfg.min_model_ratio * ratio_model_size(cfg.ratio_model_path, cfg.voxel_size)
 
 
 def load_model(cfg: PoseConfig):

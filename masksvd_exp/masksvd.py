@@ -31,6 +31,7 @@ class MaskSVDConfig:
     normalize_scale: bool = False         # True: モデルが半径1程度になるよう両方を拡大して MaskNet に入れる
     keep_relative: float = 0.5            # refine：確率が最大値のこの割合以上のモデル点を残す
     input_sizes: str = "density"          # "density": 元実装の密度ベース / "trained": 学習時と同じ モデル1024点・計測256点
+    model_voxel: float = 0.0              # >0: モデルをこの辺長 [m] でボクセル化（計測点群と同じ密度にする）．0: 密度から決める
 
 
 def load_masknet(cfg: MaskSVDConfig, device):
@@ -67,9 +68,12 @@ class MaskSVD:
     def crop_model(self, measured):
         """MaskNet で計測点群に対応するモデル点だけを残す（モデル座標のまま返す）．"""
         cfg = self.cfg
-        ext = np.maximum(np.ptp(measured, axis=0), 1e-4)
-        density = len(measured) / np.prod(ext)
-        voxel = cfg.density_weight * (1.0 / density) ** (1 / 3)
+        if cfg.model_voxel > 0:
+            voxel = cfg.model_voxel
+        else:
+            ext = np.maximum(np.ptp(measured, axis=0), 1e-4)
+            density = len(measured) / np.prod(ext)
+            voxel = cfg.density_weight * (1.0 / density) ** (1 / 3)
         tmpl = np.asarray(self.model.voxel_down_sample(voxel).points)
         rng = np.random.default_rng(0)
         src = measured

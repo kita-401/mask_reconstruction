@@ -19,33 +19,76 @@ def fragment_pca(masks, pts, valid_idx, v_u, v_v):
     return centers, axes
 
 
+class _PointCloudCache:
+    """同じ点群（同じ配列オブジェクト）に対する画像形式の計算結果を使い回す（結果は変わらない）．
+
+    点群の配列そのものを参照として持ち，`is` で比べるので，別の点群と取り違えることはない．
+    """
+
+    def __init__(self):
+        self.key = None
+        self.store = {}
+
+    def get(self, pts, valid_idx, name, make):
+        if self.key is None or self.key[0] is not pts or self.key[1] is not valid_idx:
+            self.key = (pts, valid_idx)
+            self.store = {}
+        if name not in self.store:
+            self.store[name] = make()
+        return self.store[name]
+
+
+POINT_CACHE = _PointCloudCache()
+
+
+def depth_image(pts, valid_idx, v_u, v_v, shape):
+    """点群を画素に戻した深度画像 [m]（点のない画素は 0）．"""
+    def make():
+        Z = np.zeros(shape, dtype=np.float64)
+        Z[v_v, v_u] = pts[valid_idx, 2]
+        return Z
+    return POINT_CACHE.get(pts, valid_idx, ("depth", shape), make)
+
+
 def boundary_depth_gap(mask_k, mask_l, dil_k, dil_l, pts, valid_idx, v_u, v_v):
-    """隣接する2断片の境界付近の深度中央値の差 [m]．計算できなければ None．"""
-    b_k = pts[valid_idx[(mask_k & dil_l)[v_v, v_u]]]
-    b_l = pts[valid_idx[(mask_l & dil_k)[v_v, v_u]]]
-    b_k = b_k[b_k[:, 2] > 0]
-    b_l = b_l[b_l[:, 2] > 0]
-    if len(b_k) == 0 or len(b_l) == 0:
+    """隣接する2断片の境界付近の深度中央値の差 [m]．計算できなければ None．
+
+    点は画素と1対1に対応するので，境界の画素の深度を深度画像から直接取る（全点群からの抽出より速い）．
+    """
+    Z = depth_image(pts, valid_idx, v_u, v_v, mask_k.shape)
+    z_k = Z[mask_k & dil_l]
+    z_l = Z[mask_l & dil_k]
+    z_k = z_k[z_k > 0]
+    z_l = z_l[z_l > 0]
+    if len(z_k) == 0 or len(z_l) == 0:
         return None
-    return abs(np.median(b_k[:, 2]) - np.median(b_l[:, 2]))
+    return abs(np.median(z_k) - np.median(z_l))
 
 
-def cylinder_axis(p, cfg: Config, rng):
+def cylinder_axis(p, cfg: Config, rng, normals=None):
     """法線の主成分分析で断片の円筒中心軸を求める．
 
     円筒面の法線は軸と直交するので，Σ n nᵀ の最小固有値の固有ベクトルが軸方向．
     各点を法線の逆向きに半径だけ移動すると軸上に乗るので，その中央値を軸の通過点とする．
 
+    normals を渡すと（fast_normals：深度画像上で求めた法線），断片ごとの法線推定を省く．
+
     Returns: (方向 d, 通過点 c0, 軸上の範囲 t_min, t_max)
     """
-    import open3d as o3d
-
-    if len(p) > cfg.axis_max_points:
-        p = p[rng.choice(len(p), cfg.axis_max_points, replace=False)]
-    pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(p))
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.normal_radius, max_nn=30))
-    pc.orient_normals_towards_camera_location(np.zeros(3))
-    n = np.asarray(pc.normals)
+    if normals is not None:
+        ok = np.linalg.norm(normals, axis=1) > 0
+        p, n = p[ok], normals[ok]
+        if len(p) > cfg.axis_max_points:
+            sel = rng.choice(len(p), cfg.axis_max_points, replace=False)
+            p, n = p[sel], n[sel]
+    else:
+        import open3d as o3d
+        if len(p) > cfg.axis_max_points:
+            p = p[rng.choice(len(p), cfg.axis_max_points, replace=False)]
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(p))
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.normal_radius, max_nn=30))
+        pc.orient_normals_towards_camera_location(np.zeros(3))
+        n = np.asarray(pc.normals)
     _, V = np.linalg.eigh(n.T @ n / len(n))
     d = V[:, 0]
     c = p - cfg.pipe_radius * n
@@ -72,11 +115,22 @@ def distance_matrix(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     - それ以外 → 重心間距離 + (主軸の角度差 + 主軸と重心方向のずれ) * L_cad
                  隣接していて深度が不連続なら adjacent_penalty を加算
     """
+    if cfg.use_cpp:   # 同じ距離行列を C++ の基本処理で計算する（merging_cpp.py）
+        from .merging_cpp import distance_matrix_cpp
+        return distance_matrix_cpp(masks, pts, valid_idx, v_u, v_v, cfg)
     n = len(masks)
     centers, axes = fragment_pca(masks, pts, valid_idx, v_u, v_v)
     if cfg.use_cylinder_axis:
         rng = np.random.default_rng(0)
-        cyl = [cylinder_axis(pts[valid_idx[m[v_v, v_u]]], cfg, rng) for m in masks]
+        if cfg.fast_normals:
+            from .graph_merging import _normal_image
+            Nflat = _normal_image(pts, valid_idx, v_u, v_v, masks[0].shape, cfg)[v_v, v_u]
+            cyl = []
+            for m in masks:
+                sel = np.flatnonzero(m[v_v, v_u])
+                cyl.append(cylinder_axis(pts[valid_idx[sel]], cfg, rng, normals=Nflat[sel]))
+        else:
+            cyl = [cylinder_axis(pts[valid_idx[m[v_v, v_u]]], cfg, rng) for m in masks]
         areas = [int(m.sum()) for m in masks]
     kernel = np.ones((cfg.adjacency_kernel, cfg.adjacency_kernel), np.uint8)
     dilated = [cv2.dilate(m.astype(np.uint8), kernel) > 0 for m in masks]
@@ -221,6 +275,16 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.post_close:
+        # 2026-10-16 の改善5（postprocess.py）
+        from dataclasses import replace
+        from .postprocess import close_masks
+        merged = merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, post_close=False), cam)
+        return close_masks(merged, pts, valid_idx, v_u, v_v, cfg)
+    if cfg.use_size_constraint or cfg.own_linkage or cfg.use_convexity or cfg.no_force_connect:
+        # 2026-10-16 の改善2・3（constrained_merging.py）．フラグがすべてオフならここは通らない
+        from .constrained_merging import merge_constrained
+        return merge_constrained(masks, pts, valid_idx, v_u, v_v, cfg, cam)
     if cfg.auto_model_shape:
         from dataclasses import replace
         from .model_shape import cylinder_info_from_file
@@ -247,12 +311,16 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     Z = linkage(squareform(D, checks=False), method=cfg.linkage_method)
     if cfg.use_cad_constraint:
         rng = np.random.default_rng(0)
-        frag_pts = []
-        for m in masks:
-            p = pts[valid_idx[m[v_v, v_u]]]
-            if len(p) > cfg.max_points_per_fragment:
-                p = p[rng.choice(len(p), cfg.max_points_per_fragment, replace=False)]
-            frag_pts.append(p)
+        if cfg.use_cpp:
+            from .merging_cpp import fragment_points_subsampled
+            frag_pts = fragment_points_subsampled(masks, pts, valid_idx, v_u, v_v, cfg, rng)
+        else:
+            frag_pts = []
+            for m in masks:
+                p = pts[valid_idx[m[v_v, v_u]]]
+                if len(p) > cfg.max_points_per_fragment:
+                    p = p[rng.choice(len(p), cfg.max_points_per_fragment, replace=False)]
+                frag_pts.append(p)
         labels = cad_constrained_cut(Z, D, frag_pts, cfg)
     else:
         labels = fcluster(Z, t=cfg.cluster_thresh, criterion="distance")

@@ -38,6 +38,13 @@ METHODS = {
                                 two_stage=True, stage1_min_area=3000,
                                 use_cylinder_axis=True, axis_min_area=5000, axis_dist_thresh=0.012,
                                 hier_overlap_link=True, overlap_link_ratio=0.5, auto_model_shape=True),
+    # hier_improved_v2 の法線を深度画像上の差分で求める高速版（2026-10-16，統合 1197 → 約 670ms，精度は同等以上）
+    "hier_improved_v2_fast": replace(_FIXED, hier_normal_check=True, normal_angle_thresh=20, hier_tiebreak=True,
+                                     use_cad_constraint=True, cad_size_margin=1.2, cad_remerge=True,
+                                     two_stage=True, stage1_min_area=3000,
+                                     use_cylinder_axis=True, axis_min_area=5000, axis_dist_thresh=0.012,
+                                     hier_overlap_link=True, overlap_link_ratio=0.5, auto_model_shape=True,
+                                     fast_normals=True, fast_normal_window=9),
     # 参考：2段階グラフ統合（大きな断片で統合 → 小さな断片を割り当て）
     "graph_2stage": replace(_FIXED, merge_method="graph", normal_angle_thresh=20, axis_min_area=5000,
                             use_cad_constraint=True, cad_size_margin=1.2,

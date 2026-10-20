@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 weights/
 results/
+mask_reconstruction/cpp/build/

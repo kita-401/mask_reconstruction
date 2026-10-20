@@ -132,3 +132,63 @@ class Config:
     absorb_small: bool = False
     absorb_area: int = 5000            # [px] これ未満のまとまりを吸収の対象にする
     absorb_depth_thresh: float = 0.008  # [m] 吸収先との境界の深度差の上限
+
+    # ===== 2026-10-16 追加の改善（既定はすべてオフ．オフなら上の挙動と同一） =====
+    # --- 改善1：LingBot-Depth を使わない深度（depth_refine=False のときだけ有効） ---
+    # True : 時間方向メディアン（複数フレームがあれば）または有効画素だけの空間メディアン．欠損は補完しない
+    # False: 既存の remove_depth_outliers（飛び値除去のみ）
+    depth_temporal: bool = False
+    depth_temporal_frames: int = 5      # 取得・使用するフレーム数 N（N=1 なら空間メディアンのみ）
+    depth_temporal_min_valid: float = 0.5  # 有効フレームがこの割合未満の画素は欠損
+    depth_spatial_ksize: int = 5        # N=1 のときの空間メディアンの窓 [px]（有効画素だけで計算）
+
+    # --- 改善2：CADサイズによる cannot-link（制約付き平均連結クラスタリング，constrained_merging.py） ---
+    use_size_constraint: bool = False
+    size_margin: float = 0.15           # m．(1+m)×CAD値を超える統合を禁止
+    size_percentile: float = 2.0        # 寸法・最大径は [p, 100-p] パーセンタイルの範囲で計算
+    size_erode_px: int = 0              # 寸法・最大径の点群を取る前にマスクを収縮する [px]（縁の他物体の点対策．面積には使わない）
+    cad_proj_rotations: int = 500       # A_cad を求めるランダム回転の数
+    cad_proj_seed: int = 0
+    # 自前の平均連結を使う（制約オフでも True にすれば自前実装．テストで scipy と比較する）
+    own_linkage: bool = False
+
+    # --- 改善3：法線の凸性（LCCP型）による境界判定 ---
+    use_convexity: bool = False
+    no_force_connect: bool = False      # 「段差 < bound_depth_thresh → connected_dist に上書き」をやめる
+    normal_window: int = 5              # [px] 深度画像上の法線の差分窓
+    convex_samples: int = 30            # 境界上のサンプル数 K
+    convex_inset: int = 3               # [px] 境界から内側へずらす距離
+    flat_angle: float = 15.0            # [deg] 法線のなす角がこれ未満なら平坦（凸扱い）
+    concave_ratio_thresh: float = 0.5   # τ_r
+    concave_angle_thresh: float = -1.0  # τ_a [deg]．負なら CAD の最大凹角 θ_cad_max + concave_angle_margin
+    concave_angle_margin: float = 10.0  # [deg]
+    # β．凸・平坦な境界の距離から引く量．scripts/analyze_pairs.py の leave-one-scene-out で
+    # 全10折とも 5.0 が選ばれた（基本コストの分布：同一部品の中央値 ≈5，別部品 ≈7.5，cluster_thresh 1.5）
+    convex_bonus: float = 5.0
+    concave_penalty: float = 10.0       # 凹と判定した境界に足す量（既存の adjacent_penalty と同じ）
+    cad_concave_pair_dist: tuple = (0.004, 0.010)  # [m] CAD上で凹凸を調べる点対の距離（境界をはさむ2点の間隔）
+    cad_concave_percentile: float = 99.0  # θ_cad_max として使う凹角分布のパーセンタイル
+
+    # --- 改善5：統合マスクの後処理（深度が連続な範囲だけで closing と穴埋め） ---
+    post_close: bool = False
+    post_close_ksize: int = 7           # [px]
+    post_depth_thresh: float = 0.005    # [m] 局所平均深度との差がこれ未満の画素だけ加える
+    cad_cache_dir: str = str(RESULTS_DIR / "cad_prior")
+
+    # --- 高速化：統合で使う法線（境界の法線・円筒軸）を深度画像上の差分の外積で求める ---
+    # False なら従来どおり Open3D の近傍探索（全点群 boundary_normal_radius，円筒軸は断片ごとに normal_radius）
+    fast_normals: bool = False
+    # [px] 差分をとる窓（convexity.organized_normals）．hier_improved_v2 の10配置で 5/7/9 を比べ，9 が従来と同等以上
+    fast_normal_window: int = 9
+
+    # --- 高速化：重い基本処理を C++（cpp/mr_kernels.cpp）で計算する．結果は Python 版と同じ ---
+    # 断片の点の取り出し，断片の組ごとの隣接・深度差・法線角・重なり，深度画像上の法線，断片フィルタの集計
+    use_cpp: bool = False
+
+    # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
+    # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
+    use_plane_removal: bool = False
+    plane_dist_thresh: float = 0.005    # [m] 平面からこの距離以内の点を「平面上」とする
+    plane_max_ratio: float = 0.5
+    plane_voxel: float = 0.005          # [m] 平面推定の前に点群を間引く
+    plane_ransac_iter: int = 1000
