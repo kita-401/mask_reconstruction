@@ -66,6 +66,11 @@ VARIANTS = {
 
 VARIANTS["v2f"] = ("hier_improved_v2_fast（C++，LingBot-Depth あり）", dict(use_cpp=True))
 VARIANTS["v2f_raw"] = ("hier_improved_v2_fast（C++，LingBot-Depth なし）", dict(use_cpp=True, depth_refine=False))
+VARIANTS["v2f_fm"] = ("hier_improved_v2_fast（C++，LingBot-Depth あり）+ 統合後の仕上げ", dict(use_cpp=True, final_merge=True))
+VARIANTS["v2f_raw_fm"] = ("hier_improved_v2_fast（C++，LingBot-Depth なし）+ 統合後の仕上げ",
+                          dict(use_cpp=True, depth_refine=False, final_merge=True))
+VARIANTS["v2f_raw_noaxis_fm"] = ("hier_improved_v2_fast（C++，LingBot-Depth なし，円筒軸なし）+ 統合後の仕上げ",
+                                 dict(use_cpp=True, depth_refine=False, use_cylinder_axis=False, final_merge=True))
 VARIANTS["v2f_raw_noaxis"] = ("hier_improved_v2_fast（C++，LingBot-Depth なし，円筒軸なし）",
                               dict(use_cpp=True, depth_refine=False, use_cylinder_axis=False))
 
@@ -75,7 +80,7 @@ def _v2_variants():
     for key in ("v2", "v2_fast5", "v2_fast7", "v2_fast9"):
         name, kw = VARIANTS[key]
         VARIANTS[key] = (name, replace(METHODS["hier_improved_v2"], **(kw or {})))
-    for key in ("v2f", "v2f_raw", "v2f_raw_noaxis"):
+    for key in ("v2f", "v2f_raw", "v2f_raw_noaxis", "v2f_fm", "v2f_raw_fm", "v2f_raw_noaxis_fm"):
         name, kw = VARIANTS[key]
         VARIANTS[key] = (name, replace(METHODS["hier_improved_v2_fast"], **kw))
 

@@ -285,6 +285,12 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.final_merge:
+        # 統合後の仕上げ（final_merge.py）．分かれたマスクをもう一度まとめる
+        from dataclasses import replace
+        from .final_merge import final_merge_masks
+        merged = merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, final_merge=False), cam)
+        return final_merge_masks(merged, pts, valid_idx, v_u, v_v, cfg, cam)
     if cfg.post_close:
         # 2026-10-16 の改善5（postprocess.py）
         from dataclasses import replace

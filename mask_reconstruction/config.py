@@ -185,6 +185,10 @@ class Config:
     # 断片の点の取り出し，断片の組ごとの隣接・深度差・法線角・重なり，深度画像上の法線，断片フィルタの集計
     use_cpp: bool = False
 
+    # --- 統合後の仕上げ：1つの部品が2つ以上のマスクに分かれたものをまとめる（final_merge.py） ---
+    final_merge: bool = False
+    final_merge_margin: float = 0.2     # まとめた後の大きさが CAD の (1+この値) 倍以内なら許す
+
     # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
     # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
     use_plane_removal: bool = False
