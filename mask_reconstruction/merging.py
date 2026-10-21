@@ -204,16 +204,24 @@ def principal_extent(p, percentile):
     return np.percentile(proj, 100 - percentile, axis=0) - np.percentile(proj, percentile, axis=0)
 
 
+_CAD_EXTENT_CACHE = {}
+
+
 def cad_extent(cfg: Config):
-    """CADモデル点群の主軸方向寸法 [m]（大きい順）．"""
+    """CADモデル点群の主軸方向寸法 [m]（大きい順）．同じファイル（更新時刻も同じ）なら読み込みと計算を1回だけ行う．"""
+    import os
     import open3d as o3d
-    return principal_extent(np.asarray(o3d.io.read_point_cloud(cfg.cad_model).points), 0.0)
+    key = (cfg.cad_model, os.path.getmtime(cfg.cad_model))
+    if key not in _CAD_EXTENT_CACHE:
+        _CAD_EXTENT_CACHE[key] = principal_extent(np.asarray(o3d.io.read_point_cloud(cfg.cad_model).points), 0.0)
+    return _CAD_EXTENT_CACHE[key].copy()
 
 
 def remerge_within_cad(clusters, D, frag_pts, limit, cfg: Config):
     """分割で生じた切れ端を，最も近い断片対（single linkage）の距離が閾値以下で，
     統合後もCAD寸法に収まるクラスタ同士で貪欲に再統合する．統合後の寸法が小さい組を優先．"""
     clusters = [list(c) for c in clusters]
+    ext_cache = {}   # 同じ断片の並び（統合後のクラスタ）の寸法は繰り返しのたびに計算し直さない（結果は同じ）
     while True:
         cands = []
         for a in range(len(clusters)):
@@ -221,8 +229,10 @@ def remerge_within_cad(clusters, D, frag_pts, limit, cfg: Config):
                 d = D[np.ix_(clusters[a], clusters[b])].min()
                 if d > cfg.cluster_thresh:
                     continue
-                ext = principal_extent(np.vstack([frag_pts[i] for i in clusters[a] + clusters[b]]),
-                                       cfg.extent_percentile)
+                key = tuple(clusters[a] + clusters[b])
+                if key not in ext_cache:
+                    ext_cache[key] = principal_extent(np.vstack([frag_pts[i] for i in key]), cfg.extent_percentile)
+                ext = ext_cache[key]
                 if np.all(ext[:2] <= limit):
                     cands.append((d, ext[0], a, b))
         if not cands:

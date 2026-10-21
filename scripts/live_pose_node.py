@@ -391,6 +391,8 @@ def main():
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
     ap.add_argument("--model", choices=["full", "half"], default="full",
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
+    ap.add_argument("--blas-threads", type=int, default=1,
+                    help="numpy の行列計算のスレッド数（0 で制限しない＝従来どおり）")
     ap.add_argument("--no-lingbot", action="store_true",
                     help="深度補完（LingBot-Depth）を使わない（深度の飛び値の除去だけ）")
     ap.add_argument("--voxel", type=float, default=0.002,
@@ -410,6 +412,11 @@ def main():
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")
     ap.add_argument("--max-frames", type=int, default=0, help=">0 ならこの回数推定して終了（動作確認用）")
     args, ros_args = ap.parse_known_args()
+    if args.blas_threads > 0:
+        # numpy の行列計算（OpenBLAS）が小さな配列にも多数のスレッドを使い，その待ち合わせで統合が遅くなるため．
+        # 足し算の順序が変わるので，マスクが画素単位でわずかに変わることがある（データセットの評価値は同じ）
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(limits=args.blas_threads, user_api="blas")
     rclpy.init(args=ros_args)
     node = LivePoseNode(args)
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
