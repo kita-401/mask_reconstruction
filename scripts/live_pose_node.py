@@ -112,6 +112,8 @@ class LivePoseNode(Node):
         cfg = METHODS[args.method]
         if not args.no_plane_removal:   # 黒いトレイ以外の背景（机など）を平面として除く
             cfg = replace(cfg, use_plane_removal=True)
+        if args.split_fragments:        # 統合の前に，2つの部品にまたがった断片を深度・法線の途切れで分ける
+            cfg = replace(cfg, split_fragments=True)
         if args.no_cylinder_axis:       # 円筒軸による同一部品の判定を使わない
             cfg = replace(cfg, use_cylinder_axis=False)
         if args.no_lingbot:             # 深度補完（LingBot-Depth）を使わず，飛び値の除去だけにする
@@ -395,6 +397,8 @@ def main():
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
     ap.add_argument("--blas-threads", type=int, default=1,
                     help="numpy の行列計算のスレッド数（0 で制限しない＝従来どおり）")
+    ap.add_argument("--split-fragments", action="store_true",
+                    help="統合の前に，2つの部品にまたがった FastSAM の断片を深度・法線の途切れで分ける")
     ap.add_argument("--no-cylinder-axis", action="store_true",
                     help="統合で円筒軸による同一部品の判定を使わない")
     ap.add_argument("--no-lingbot", action="store_true",

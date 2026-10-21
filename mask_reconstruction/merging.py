@@ -285,6 +285,12 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.split_fragments:
+        # 統合前の断片の切り分け（split_fragments.py）．2つの部品にまたがった断片を分けてから統合する
+        from dataclasses import replace
+        from .split_fragments import split_fragments
+        masks = split_fragments(masks, pts, valid_idx, v_u, v_v, cfg)
+        return merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, split_fragments=False), cam)
     if cfg.final_merge:
         # 統合後の仕上げ（final_merge.py）．分かれたマスクをもう一度まとめる
         from dataclasses import replace
