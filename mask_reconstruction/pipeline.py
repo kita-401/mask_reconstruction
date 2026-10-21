@@ -25,7 +25,8 @@ class MaskReconstructor:
     def __init__(self, cfg: Config = Config(), device=None):
         self.cfg = cfg
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.lingbot = load_lingbot(cfg, self.device)
+        # LingBot-Depth を使わない設定（depth_refine=False）なら，モデルを読み込まない（GPU メモリと起動時間の節約）
+        self.lingbot = load_lingbot(cfg, self.device) if cfg.depth_refine else None
         self.fastsam = FastSAM(cfg.fastsam_weights)
 
     def fragments(self, sample):

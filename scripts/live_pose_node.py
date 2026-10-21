@@ -112,6 +112,8 @@ class LivePoseNode(Node):
         cfg = METHODS[args.method]
         if not args.no_plane_removal:   # 黒いトレイ以外の背景（机など）を平面として除く
             cfg = replace(cfg, use_plane_removal=True)
+        if args.no_lingbot:             # 深度補完（LingBot-Depth）を使わず，飛び値の除去だけにする
+            cfg = replace(cfg, depth_refine=False)
         if not args.no_cpp:             # 重い基本処理を C++ で（結果は Python 版と同じ）
             cfg = replace(cfg, use_cpp=True)
         self.recon = MaskReconstructor(cfg)
@@ -389,6 +391,8 @@ def main():
     ap.add_argument("--cpu-registration", action="store_true", help="位置合わせを従来の CPU（Open3D）版で行う")
     ap.add_argument("--model", choices=["full", "half"], default="full",
                     help="位置合わせ・点数の比に使うモデル点群（full: 全周，half: カメラ側半分）")
+    ap.add_argument("--no-lingbot", action="store_true",
+                    help="深度補完（LingBot-Depth）を使わない（深度の飛び値の除去だけ）")
     ap.add_argument("--voxel", type=float, default=0.002,
                     help="位置合わせの前に計測点群とモデルを間引くボクセルの辺長 [m]")
     ap.add_argument("--model-voxel", type=float, default=0.0,
