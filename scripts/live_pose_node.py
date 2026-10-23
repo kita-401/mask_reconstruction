@@ -506,7 +506,7 @@ def main():
                     help="全周モデルでも，見える面だけを対応先にする処理をしない")
     ap.add_argument("--max-size-ratio", type=float, default=0.3,
                     help="見えている長さか実面積が CAD の (1+この値) 倍を超えるマスクは推定しない（0 以下で判定しない）")
-    ap.add_argument("--min-model-ratio", type=float, default=0.20,
+    ap.add_argument("--min-model-ratio", type=float, default=0.30,
                     help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
