@@ -197,6 +197,9 @@ class Config:
     split_normal_thresh: float = 30.0   # [deg] 隣り合う画素の法線の角度差がこれ以上なら途切れ
     split_min_area: int = 1000          # [px] これ未満の切れ端は捨てる
 
+    # --- 高速化：点群化を GPU で行う（gpu_ops.py）．結果は CPU 版と同じ ---
+    use_gpu_ops: bool = False
+
     # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
     # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
     use_plane_removal: bool = False

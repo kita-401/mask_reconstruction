@@ -49,7 +49,11 @@ class MaskReconstructor:
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
         sync()
         times["depth"], t = time.perf_counter() - t, time.perf_counter()
-        pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
+        if self.cfg.use_gpu_ops:   # 同じ点群を GPU で計算する（gpu_ops.py）
+            from .gpu_ops import depth_to_points as depth_to_points_gpu
+            pts, valid_idx, v_u, v_v = depth_to_points_gpu(depth_mm, sample, self.cfg)
+        else:
+            pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
         times["points"], t = time.perf_counter() - t, time.perf_counter()
         kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg, pts=pts)
         times["filter"], t = time.perf_counter() - t, time.perf_counter()
