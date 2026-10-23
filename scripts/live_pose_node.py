@@ -93,54 +93,6 @@ def temporal_median_depth(frames, min_valid=0.5):
     return np.round(med).astype(np.uint16)
 
 
-class ConsistencyCheck:
-    """複数フレームで同じ結果になった部品だけを確定させる（--consistency K）．
-
-    今のフレームの各マスクについて，直前の K-1 フレームのそれぞれに，マスクの IoU が iou_min 以上の
-    マスクがあり，両方に姿勢があるなら姿勢のずれ（ADD-S）が gate 以下であることを確かめる．
-    満たさないマスクを「未確定」として返す．姿勢をなめらかにすることはしない．
-    """
-
-    def __init__(self, k, model_pts, iou_min=0.8, gate=0.005, scale=4, n_model=300):
-        from collections import deque
-        self.hist = deque(maxlen=k - 1)
-        self.iou_min, self.gate, self.scale = iou_min, gate, scale
-        rng = np.random.default_rng(0)
-        self.model = model_pts[rng.choice(len(model_pts), min(n_model, len(model_pts)), replace=False)]
-
-    def _small(self, m):
-        return m[::self.scale, ::self.scale]
-
-    def _add_s(self, Ta, Tb):
-        from scipy.spatial import cKDTree
-        a = self.model @ Ta[:3, :3].T + Ta[:3, 3]
-        b = self.model @ Tb[:3, :3].T + Tb[:3, 3]
-        return float(np.mean(cKDTree(b).query(a)[0]))
-
-    def check(self, masks, poses):
-        cur = [(self._small(m), T) for m, T in zip(masks, poses)]
-        unconfirmed = set()
-        for i, (m, T) in enumerate(cur):
-            if len(self.hist) < self.hist.maxlen:
-                unconfirmed.add(i)
-                continue
-            area = np.count_nonzero(m)
-            for prev in self.hist:
-                best, best_T = 0.0, None
-                for pm, pT in prev:
-                    inter = np.count_nonzero(m & pm)
-                    if inter == 0:
-                        continue
-                    iou = inter / (area + np.count_nonzero(pm) - inter)
-                    if iou > best:
-                        best, best_T = iou, pT
-                if best < self.iou_min or (T is not None and best_T is not None and self._add_s(T, best_T) > self.gate):
-                    unconfirmed.add(i)
-                    break
-        self.hist.append(cur)
-        return unconfirmed
-
-
 def seg_color(i):
     """部品 i の表示色（BGR）．色相を黄金比ずつ飛ばして選ぶので，番号が隣でも色が大きく変わる．"""
     hsv = np.uint8([[[int(180 * ((i * 0.6180339887) % 1.0)), 230, 255]]])
@@ -197,7 +149,6 @@ class LivePoseNode(Node):
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
-        self.consistency = ConsistencyCheck(args.consistency, self.model) if args.consistency > 1 else None
         self.masknet = None
         if args.registration == "masknet":
             # 全周モデルを MaskNet で計測点群に合わせて削り，削ったモデルで SVD（符号探索）+ ICP（masksvd_exp）．
@@ -319,23 +270,20 @@ class LivePoseNode(Node):
             rows.append(dict(id=i, T=T.tolist(), icp_fitness=r.icp_fitness,
                              fsv=free_space_violation(self.model, T, frame, self.pc.depth_scale)))
         t_pose = time.perf_counter() - t1
-        unconfirmed = set()
-        if self.consistency is not None:   # 複数フレームで同じ結果になった部品だけを出す（--consistency）
-            unconfirmed = self.consistency.check(masks, poses)
-        named = [(f"part_{i}", T) for i, T in enumerate(poses) if T is not None and i not in unconfirmed]
+        named = [(f"part_{i}", T) for i, T in enumerate(poses) if T is not None]
         with self.pose_lock:
             self.poses = named
         self.publish_tf()
         stamp = self.get_clock().now().to_msg()
         t_pub0 = time.perf_counter()
         overlay = draw_poses(frame, self.model, poses, masks)   # 色は RViz のモデル表示と同じ（部品の番号順）
-        for i in skipped + oversized + sorted(unconfirmed):   # 位置合わせしなかった・未確定の部品は輪郭を灰色で上書き
+        for i in skipped + oversized:   # 位置合わせしなかった部品は輪郭を灰色で上書き
             cnts, _ = cv2.findContours(masks[i].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(overlay, cnts, -1, (150, 150, 150), 2)
         cv2.putText(overlay, f"#{k}  parts {len(named)} (skip {len(skipped) + len(oversized)})  seg {t_seg*1000:.0f}ms  pose {t_pose*1000:.0f}ms",
                     (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_overlay.publish(image_msg(overlay, stamp))
-        self.publish_segmentation(s, masks, skipped, stamp, oversized, unconfirmed)
+        self.publish_segmentation(s, masks, skipped, stamp, oversized)
         self.publish_models(named, len(poses), stamp)
         if self.masknet is not None:
             self.publish_masknet(crops, clouds, poses, stamp)
@@ -351,8 +299,7 @@ class LivePoseNode(Node):
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個，"
                                f"大きすぎて推定しない {len(oversized)} 個）"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
-                               f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）"
-                               + (f"，未確定 {len(unconfirmed)} 個" if self.consistency is not None else ""))
+                               f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
         if self.save_dir is not None:
             d = self.save_dir / f"frame{k:04d}"
             d.mkdir(exist_ok=True)
@@ -380,7 +327,7 @@ class LivePoseNode(Node):
             return True
         return principal_extent(p, 2.0)[0] > lim * self.cad.L[0]
 
-    def publish_segmentation(self, s, masks, skipped, stamp, oversized=(), unconfirmed=()):
+    def publish_segmentation(self, s, masks, skipped, stamp, oversized=()):
         """セグメンテーションの状況：マスクを部品の色で塗った画像と，マスクごとに色分けした点群．
 
         部品ごとに別の色（seg_color，モデル表示と同じ）で塗る．面積の大きいマスクから塗り，小さいマスクを上にする．
@@ -398,7 +345,7 @@ class LivePoseNode(Node):
                 continue
             m = masks[i]
             label[m] = seg_color(i)
-            alpha[m] = 0.3 if (i in skipped or i in unconfirmed) else 0.65
+            alpha[m] = 0.3 if i in skipped else 0.65
             if i in skipped:
                 alpha[m & stripes] = 0.0
         covered = alpha > 0
@@ -418,13 +365,12 @@ class LivePoseNode(Node):
             m = masks[i]
             ys, xs = np.nonzero(m)
             if len(xs):
-                text = f"{i}!" if i in oversized else f"{i}x" if i in skipped else f"{i}?" if i in unconfirmed else str(i)
+                text = f"{i}!" if i in oversized else f"{i}x" if i in skipped else str(i)
                 org = (int(xs.mean()) - 8, int(ys.mean()) + 6)
                 cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
                 cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.putText(img, f"masks {n}  estimated {n - len(skipped) - len(oversized)}  few points(x) {len(skipped)}"
-                    f"  too big(!) {len(oversized)}" + (f"  unconfirmed(?) {len(unconfirmed)}" if unconfirmed else ""),
-                    (10, 22),
+                    f"  too big(!) {len(oversized)}", (10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_masks.publish(image_msg(img, stamp))
         depth = np.where(covered, s.depth, 0).astype(np.uint16)   # 大きすぎるマスクの点は出さない
@@ -480,8 +426,6 @@ def main():
                     help="統合の前に，2つの部品にまたがった FastSAM の断片を深度・法線の途切れで分ける")
     ap.add_argument("--no-cylinder-axis", action="store_true",
                     help="統合で円筒軸による同一部品の判定を使わない")
-    ap.add_argument("--consistency", type=int, default=0,
-                    help="直近 K フレームで同じマスク（と姿勢）が続いた部品だけを TF に出す（0 で使わない）")
     ap.add_argument("--temporal-depth", type=int, default=0,
                     help="深度を直近 N フレームの画素ごとの中央値にする（静止シーン用，0 で使わない）")
     ap.add_argument("--no-lingbot", action="store_true",
