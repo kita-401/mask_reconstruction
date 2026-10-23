@@ -93,6 +93,52 @@ def temporal_median_depth(frames, min_valid=0.5):
     return np.round(med).astype(np.uint16)
 
 
+class MaskIdTracker:
+    """フレームが変わっても，同じパイプのマスクに同じ ID を付ける（--track-ids）．姿勢には手を加えない．
+
+    今のマスクと，登録済みの各 ID の直近のマスクの IoU を全組み合わせで求め，IoU の合計が最大になる
+    1対1の対応（ハンガリアン法）のうち IoU が iou_min 以上の組に ID を引き継ぐ．
+    対応しないマスクには新しい ID を付け，max_missed フレーム続けて見つからない ID は消す．
+    マスクの比較は 1/scale に縮めて行う（軽くするため）．
+    """
+
+    def __init__(self, iou_min=0.3, max_missed=5, scale=4):
+        self.iou_min, self.max_missed, self.scale = iou_min, max_missed, scale
+        self.tracks = {}    # ID -> [直近のマスク（縮小）, 続けて見つからなかった回数]
+        self.next_id = 0
+
+    def assign(self, masks):
+        from scipy.optimize import linear_sum_assignment
+        small = [m[::self.scale, ::self.scale] for m in masks]
+        ids_prev = list(self.tracks)
+        ids = [None] * len(small)
+        if ids_prev and small:
+            iou = np.zeros((len(small), len(ids_prev)))
+            for a, m in enumerate(small):
+                am = np.count_nonzero(m)
+                for b, t in enumerate(ids_prev):
+                    pm = self.tracks[t][0]
+                    inter = np.count_nonzero(m & pm)
+                    if inter:
+                        iou[a, b] = inter / (am + np.count_nonzero(pm) - inter)
+            for a, b in zip(*linear_sum_assignment(-iou)):
+                if iou[a, b] >= self.iou_min:
+                    ids[a] = ids_prev[b]
+        for a in range(len(small)):
+            if ids[a] is None:
+                ids[a] = self.next_id
+                self.next_id += 1
+        seen = set(ids)
+        for t in list(self.tracks):
+            if t not in seen:
+                self.tracks[t][1] += 1
+                if self.tracks[t][1] > self.max_missed:
+                    del self.tracks[t]
+        for a, t in enumerate(ids):
+            self.tracks[t] = [small[a], 0]
+        return ids
+
+
 class SplitRepair:
     """直前のフレームで1つのマスクだった部品が，今のフレームで2つ以上に分かれたら，つなぎ直す（--repair-splits K）．
 
@@ -192,6 +238,8 @@ class LivePoseNode(Node):
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
         self.split_repair = SplitRepair(args.repair_splits) if args.repair_splits > 0 else None
+        self.id_tracker = MaskIdTracker() if args.track_ids else None
+        self.cur_ids = []
         self.masknet = None
         if args.registration == "masknet":
             # 全周モデルを MaskNet で計測点群に合わせて削り，削ったモデルで SVD（符号探索）+ ICP（masksvd_exp）．
@@ -316,7 +364,9 @@ class LivePoseNode(Node):
             rows.append(dict(id=i, T=T.tolist(), icp_fitness=r.icp_fitness,
                              fsv=free_space_violation(self.model, T, frame, self.pc.depth_scale)))
         t_pose = time.perf_counter() - t1
-        named = [(f"part_{i}", T) for i, T in enumerate(poses) if T is not None]
+        # マスクの ID：--track-ids なら，フレームが変わっても同じパイプに同じ ID を付ける．なければマスクの番号
+        self.cur_ids = self.id_tracker.assign(masks) if self.id_tracker is not None else list(range(len(masks)))
+        named = [(f"part_{self.cur_ids[i]}", T) for i, T in enumerate(poses) if T is not None]
         with self.pose_lock:
             self.poses = named
         self.publish_tf()
@@ -401,7 +451,7 @@ class LivePoseNode(Node):
             if i in oversized:
                 continue
             m = masks[i]
-            label[m] = seg_color(i)
+            label[m] = seg_color(self.cur_ids[i])
             alpha[m] = 0.3 if i in skipped else 0.65
             if i in skipped:
                 alpha[m & stripes] = 0.0
@@ -422,7 +472,8 @@ class LivePoseNode(Node):
             m = masks[i]
             ys, xs = np.nonzero(m)
             if len(xs):
-                text = f"{i}!" if i in oversized else f"{i}x" if i in skipped else str(i)
+                n_id = self.cur_ids[i]
+                text = f"{n_id}!" if i in oversized else f"{n_id}x" if i in skipped else str(n_id)
                 text += "+" if i in repaired else ""
                 org = (int(xs.mean()) - 8, int(ys.mean()) + 6)
                 cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
@@ -446,7 +497,7 @@ class LivePoseNode(Node):
             if T is None:
                 continue
             pts.append(crop @ T[:3, :3].T + T[:3, 3])
-            cols.append(np.tile(np.array(seg_color(i), np.uint8), (len(crop), 1)))
+            cols.append(np.tile(np.array(seg_color(self.cur_ids[i]), np.uint8), (len(crop), 1)))
         self.pub_crop.publish(points_msg(np.vstack(pts) if pts else np.zeros((0, 3)),
                                          np.vstack(cols) if cols else np.zeros((0, 3), np.uint8), stamp))
         meas = list(clouds.values())
@@ -484,6 +535,8 @@ def main():
                     help="統合の前に，2つの部品にまたがった FastSAM の断片を深度・法線の途切れで分ける")
     ap.add_argument("--no-cylinder-axis", action="store_true",
                     help="統合で円筒軸による同一部品の判定を使わない")
+    ap.add_argument("--track-ids", action="store_true",
+                    help="フレームが変わっても同じパイプのマスクに同じ ID を付ける（TF は part_<ID>）")
     ap.add_argument("--repair-splits", type=int, default=0,
                     help="直前 K フレームで1つだった部品のマスクが分かれたら，つなぎ直す（0 で使わない）")
     ap.add_argument("--temporal-depth", type=int, default=0,
