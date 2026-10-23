@@ -139,48 +139,6 @@ class MaskIdTracker:
         return ids
 
 
-class SplitRepair:
-    """直前のフレームで1つのマスクだった部品が，今のフレームで2つ以上に分かれたら，つなぎ直す（--repair-splits K）．
-
-    直前 K フレームの「つなぎ直す前の」マスクと比べる（誤りを次のフレームに引き継がないため）．
-    今のマスクのうち，前のフレームのマスク P に各々の 80% 以上が収まるものが2つ以上あり，それらを合わせた
-    マスクと P の IoU が 0.7 以上で，合わせても部品1個の大きさに収まる（fits）なら，1つにまとめる．
-    新しいフレームから順に調べる．マスクの比較は 1/scale に縮めて行う（軽くするため）．
-    """
-
-    def __init__(self, k, inside=0.8, iou_min=0.7, scale=4):
-        from collections import deque
-        self.hist = deque(maxlen=k)
-        self.inside, self.iou_min, self.scale = inside, iou_min, scale
-
-    def repair(self, masks, fits):
-        small = [m[::self.scale, ::self.scale] for m in masks]
-        areas = [np.count_nonzero(m) for m in small]
-        groups, used = [], set()
-        for prev in reversed(self.hist):
-            for P in prev:
-                members = [i for i, m in enumerate(small) if i not in used and areas[i] > 0
-                           and np.count_nonzero(m & P) >= self.inside * areas[i]]
-                if len(members) < 2:
-                    continue
-                u = np.logical_or.reduce([small[i] for i in members])
-                inter = np.count_nonzero(u & P)
-                if inter / (np.count_nonzero(u) + np.count_nonzero(P) - inter) < self.iou_min:
-                    continue
-                full = np.logical_or.reduce([masks[i] for i in members])
-                if not fits(full):
-                    continue
-                groups.append((members, full))
-                used.update(members)
-        self.hist.append(small)
-        if not groups:
-            return masks, set()
-        out = [m for i, m in enumerate(masks) if i not in used]
-        repaired = set(range(len(out), len(out) + len(groups)))
-        out += [full for _, full in groups]
-        return out, repaired
-
-
 def seg_color(i):
     """部品 i の表示色（BGR）．色相を黄金比ずつ飛ばして選ぶので，番号が隣でも色が大きく変わる．"""
     hsv = np.uint8([[[int(180 * ((i * 0.6180339887) % 1.0)), 230, 255]]])
@@ -237,7 +195,6 @@ class LivePoseNode(Node):
         # 位置合わせ：既定は GPU で全部品まとめて（registration_gpu.py）．--cpu-registration で従来の Open3D 版
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
-        self.split_repair = SplitRepair(args.repair_splits) if args.repair_splits > 0 else None
         self.id_tracker = MaskIdTracker() if args.track_ids else None
         self.cur_ids = []
         self.masknet = None
@@ -313,9 +270,6 @@ class LivePoseNode(Node):
         t_seg = time.perf_counter() - t0
         K = np.array([[s.fx, 0, s.cx], [0, s.fy, s.cy], [0, 0, 1]])
         frame = Frame(rgb=s.rgb, depth=s.depth, K=K)
-        repaired = set()
-        if self.split_repair is not None:   # 直前のフレームで1つだったのに分かれたマスクをつなぎ直す（--repair-splits）
-            masks, repaired = self.split_repair.repair(masks, lambda m: self.fits_one_part(m, frame, s))
         poses, rows = [], []
         t1 = time.perf_counter()
         clouds, skipped, oversized = {}, [], []
@@ -379,7 +333,7 @@ class LivePoseNode(Node):
         cv2.putText(overlay, f"#{k}  parts {len(named)} (skip {len(skipped) + len(oversized)})  seg {t_seg*1000:.0f}ms  pose {t_pose*1000:.0f}ms",
                     (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_overlay.publish(image_msg(overlay, stamp))
-        self.publish_segmentation(s, masks, skipped, stamp, oversized, repaired)
+        self.publish_segmentation(s, masks, skipped, stamp, oversized)
         self.publish_models(named, len(poses), stamp)
         if self.masknet is not None:
             self.publish_masknet(crops, clouds, poses, stamp)
@@ -395,8 +349,7 @@ class LivePoseNode(Node):
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個，"
                                f"大きすぎて推定しない {len(oversized)} 個）"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
-                               f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）"
-                               + (f"，つなぎ直したマスク {len(repaired)} 個" if self.split_repair is not None else ""))
+                               f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
         if self.save_dir is not None:
             d = self.save_dir / f"frame{k:04d}"
             d.mkdir(exist_ok=True)
@@ -409,16 +362,6 @@ class LivePoseNode(Node):
             with open(d / "poses.json", "w") as f:
                 json.dump(dict(seg_ms=t_seg * 1000, pose_ms=t_pose * 1000, parts=rows), f, indent=1)
         return True
-
-    def fits_one_part(self, m, frame, s, margin=0.2):
-        """マスクが部品1個の大きさに収まるか：主軸方向の長さ（3方向）と実面積が CAD の (1+margin) 倍以内．"""
-        p = mask_to_points(m, frame, self.pc)
-        if len(p) < 4:
-            return True
-        z = s.depth[m].astype(np.float64) / 1000.0
-        area = float(np.sum(z[z > 0] ** 2)) / (s.fx * s.fy)
-        ext = np.sort(principal_extent(p, 2.0))[::-1]
-        return area <= (1 + margin) * self.cad.A and bool(np.all(ext <= (1 + margin) * np.array(self.cad.L)))
 
     def too_big(self, m, p, s):
         """マスクが部品1個として大きすぎるか：見えている点の主軸方向の長さか実面積が，CAD の値の (1+m) 倍を超える．
@@ -434,7 +377,7 @@ class LivePoseNode(Node):
             return True
         return principal_extent(p, 2.0)[0] > lim * self.cad.L[0]
 
-    def publish_segmentation(self, s, masks, skipped, stamp, oversized=(), repaired=()):
+    def publish_segmentation(self, s, masks, skipped, stamp, oversized=()):
         """セグメンテーションの状況：マスクを部品の色で塗った画像と，マスクごとに色分けした点群．
 
         部品ごとに別の色（seg_color，モデル表示と同じ）で塗る．面積の大きいマスクから塗り，小さいマスクを上にする．
@@ -474,7 +417,6 @@ class LivePoseNode(Node):
             if len(xs):
                 n_id = self.cur_ids[i]
                 text = f"{n_id}!" if i in oversized else f"{n_id}x" if i in skipped else str(n_id)
-                text += "+" if i in repaired else ""
                 org = (int(xs.mean()) - 8, int(ys.mean()) + 6)
                 cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
                 cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -537,8 +479,6 @@ def main():
                     help="統合で円筒軸による同一部品の判定を使わない")
     ap.add_argument("--track-ids", action="store_true",
                     help="フレームが変わっても同じパイプのマスクに同じ ID を付ける（TF は part_<ID>）")
-    ap.add_argument("--repair-splits", type=int, default=0,
-                    help="直前 K フレームで1つだった部品のマスクが分かれたら，つなぎ直す（0 で使わない）")
     ap.add_argument("--temporal-depth", type=int, default=0,
                     help="深度を直近 N フレームの画素ごとの中央値にする（静止シーン用，0 で使わない）")
     ap.add_argument("--no-lingbot", action="store_true",
