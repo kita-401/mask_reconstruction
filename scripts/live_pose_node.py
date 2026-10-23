@@ -286,6 +286,16 @@ class LivePoseNode(Node):
                 clouds[i] = p
             else:            # 一部しか見えていない（奥に隠れている）部品は位置合わせしない
                 skipped.append(i)
+        n_dropped = 0
+        if not self.args.keep_few_point_masks:
+            # 点の少ない（奥に隠れて一部しか見えない）マスクは，マスクの出力からも除く（表示・ID・点群に出さない）
+            keep = [i for i in range(len(masks)) if i not in skipped]
+            new = {old: k for k, old in enumerate(keep)}
+            n_dropped = len(masks) - len(keep)
+            masks = [masks[i] for i in keep]
+            clouds = {new[i]: p for i, p in clouds.items()}
+            oversized = [new[i] for i in oversized]
+            skipped = []
         t_prep = time.perf_counter() - t1
         t2 = time.perf_counter()
         if self.masknet is not None:
@@ -347,6 +357,7 @@ class LivePoseNode(Node):
             f"評価 {(t_pose - t_prep - t_reg)*1000:.0f} / 表示の配信 {t_pub*1000:.0f} / "
             f"合計 {(time.perf_counter() - t_all0)*1000:.0f}")
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個，"
+                               f"点が少なく出力しないマスク {n_dropped} 個，"
                                f"大きすぎて推定しない {len(oversized)} 個）"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
                                f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
@@ -477,6 +488,8 @@ def main():
                     help="統合の前に，2つの部品にまたがった FastSAM の断片を深度・法線の途切れで分ける")
     ap.add_argument("--no-cylinder-axis", action="store_true",
                     help="統合で円筒軸による同一部品の判定を使わない")
+    ap.add_argument("--keep-few-point-masks", action="store_true",
+                    help="点の少ないマスクも（姿勢推定はせずに）マスクとして出力する（従来の動き）")
     ap.add_argument("--track-ids", action="store_true",
                     help="フレームが変わっても同じパイプのマスクに同じ ID を付ける（TF は part_<ID>）")
     ap.add_argument("--temporal-depth", type=int, default=0,
@@ -493,7 +506,7 @@ def main():
                     help="全周モデルでも，見える面だけを対応先にする処理をしない")
     ap.add_argument("--max-size-ratio", type=float, default=0.3,
                     help="見えている長さか実面積が CAD の (1+この値) 倍を超えるマスクは推定しない（0 以下で判定しない）")
-    ap.add_argument("--min-model-ratio", type=float, default=0.15,
+    ap.add_argument("--min-model-ratio", type=float, default=0.20,
                     help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
