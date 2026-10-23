@@ -77,6 +77,22 @@ def points_msg(xyz, bgr, stamp):
     return m
 
 
+def temporal_median_depth(frames, min_valid=0.5):
+    """深度（uint16，0 は欠損）の画素ごとの中央値．欠損のフレームは除き，有効が min_valid 未満の画素は 0．
+
+    numpy の nanmedian と同じ値を，並べ替えで速く求める（0 は並べ替えると先頭に来る）．
+    """
+    st = np.sort(np.stack(frames), axis=0)
+    n = st.shape[0]
+    c = np.count_nonzero(st, axis=0)
+    k = n - c                                 # 先頭の 0 の数
+    hi = np.take_along_axis(st, np.minimum(k + c // 2, n - 1)[None], axis=0)[0].astype(np.float64)
+    lo = np.take_along_axis(st, np.clip(k + (c - 1) // 2, 0, n - 1)[None], axis=0)[0].astype(np.float64)
+    med = np.where(c % 2 == 1, hi, (lo + hi) / 2.0)
+    med[c < min_valid * n] = 0
+    return np.round(med).astype(np.uint16)
+
+
 def seg_color(i):
     """部品 i の表示色（BGR）．色相を黄金比ずつ飛ばして選ぶので，番号が隣でも色が大きく変わる．"""
     hsv = np.uint8([[[int(180 * ((i * 0.6180339887) % 1.0)), 230, 255]]])
@@ -101,6 +117,8 @@ class LivePoseNode(Node):
         # カメラノードからの画像（カラーと深度を時刻印で組にし，最新の組だけ持つ）
         self.frame_lock = threading.Lock()
         self.latest, self.intr = None, None
+        from collections import deque
+        self.depth_buf = deque(maxlen=args.temporal_depth) if args.temporal_depth > 1 else None
         self._pending = {}
         self.create_subscription(Image, "/camera/color/image_raw", lambda m: self.on_image("color", m),
                                  qos_profile_sensor_data)
@@ -163,6 +181,8 @@ class LivePoseNode(Node):
             pair = self._pending[key]
             if "color" in pair and "depth" in pair:
                 self.latest = (pair["color"], pair["depth"])
+                if self.depth_buf is not None:   # 時間方向の中央値用に，直近の深度を取っておく
+                    self.depth_buf.append(pair["depth"])
                 self._pending = {k: v for k, v in self._pending.items() if k > key}
             elif len(self._pending) > 10:
                 self._pending = dict(sorted(self._pending.items())[-5:])
@@ -186,10 +206,15 @@ class LivePoseNode(Node):
         """1回推定する．まだカメラ画像がなければ False．"""
         with self.frame_lock:
             got, self.latest = self.latest, None   # 同じ画像で2回推定しない
+            depth_msgs = list(self.depth_buf) if self.depth_buf is not None else None
+        if depth_msgs is not None and len(depth_msgs) < self.depth_buf.maxlen:
+            return False   # 中央値に必要なフレームがまだそろっていない
         if got is None or self.intr is None:
             return False
         t_all0 = time.perf_counter()
         rgb, depth = image_from_msg(got[0]), image_from_msg(got[1])
+        if depth_msgs is not None:   # 直近 N フレームの深度の，画素ごとの中央値（静止シーン）
+            depth = temporal_median_depth([image_from_msg(m) for m in depth_msgs])
         t0 = time.perf_counter()
         s = make_sample(rgb, depth, self.intr)
         t_conv = time.perf_counter() - t_all0
@@ -401,6 +426,8 @@ def main():
                     help="統合の前に，2つの部品にまたがった FastSAM の断片を深度・法線の途切れで分ける")
     ap.add_argument("--no-cylinder-axis", action="store_true",
                     help="統合で円筒軸による同一部品の判定を使わない")
+    ap.add_argument("--temporal-depth", type=int, default=0,
+                    help="深度を直近 N フレームの画素ごとの中央値にする（静止シーン用，0 で使わない）")
     ap.add_argument("--no-lingbot", action="store_true",
                     help="深度補完（LingBot-Depth）を使わない（深度の飛び値の除去だけ）")
     ap.add_argument("--voxel", type=float, default=0.002,
