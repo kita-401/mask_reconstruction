@@ -196,8 +196,14 @@ def distance_matrix(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     return D
 
 
-def principal_extent(p, percentile):
-    """点群の主成分軸方向の寸法（大きい順，[percentile, 100-percentile] の幅）．"""
+def principal_extent(p, percentile, use_cpp=False):
+    """点群の主成分軸方向の寸法（大きい順，[percentile, 100-percentile] の幅）．
+
+    use_cpp=True なら同じ値を C++ で計算する（主成分を共分散の固有ベクトルで求めるので，丸めの分だけ違うことがある）．
+    """
+    if use_cpp:
+        from . import cpp_kernels as ck
+        return ck.principal_extent(p, percentile)
     c = p - p.mean(axis=0)
     _, _, Vt = np.linalg.svd(c, full_matrices=False)
     proj = c @ Vt.T
@@ -231,7 +237,8 @@ def remerge_within_cad(clusters, D, frag_pts, limit, cfg: Config):
                     continue
                 key = tuple(clusters[a] + clusters[b])
                 if key not in ext_cache:
-                    ext_cache[key] = principal_extent(np.vstack([frag_pts[i] for i in key]), cfg.extent_percentile)
+                    ext_cache[key] = principal_extent(np.vstack([frag_pts[i] for i in key]), cfg.extent_percentile,
+                                                      use_cpp=cfg.use_cpp)
                 ext = ext_cache[key]
                 if np.all(ext[:2] <= limit):
                     cands.append((d, ext[0], a, b))
@@ -257,7 +264,8 @@ def cad_constrained_cut(Z, D, frag_pts, cfg: Config):
         return [node] if node < n else leaves(children[node][0]) + leaves(children[node][1])
 
     def fits(node):
-        ext = principal_extent(np.vstack([frag_pts[i] for i in leaves(node)]), cfg.extent_percentile)
+        ext = principal_extent(np.vstack([frag_pts[i] for i in leaves(node)]), cfg.extent_percentile,
+                               use_cpp=cfg.use_cpp)
         return np.all(ext[:2] <= limit)
 
     clusters = []

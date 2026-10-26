@@ -5,5 +5,5 @@
 set -e
 cd "$(dirname "$0")"
 mkdir -p build
-g++ -O3 -march=native -ffp-contract=off -fPIC -shared -std=c++17 mr_kernels.cpp -o build/libmrkernels.so
+g++ -O3 -march=native -ffp-contract=off -fPIC -shared -std=c++17 -I/usr/include/eigen3 mr_kernels.cpp -o build/libmrkernels.so
 echo "built: $(pwd)/build/libmrkernels.so"

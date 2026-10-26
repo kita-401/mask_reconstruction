@@ -17,9 +17,18 @@ def _index_image(pts, valid_idx, v_u, v_v, shape):
 
 
 def fragment_indices(masks, pts, valid_idx, v_u, v_v):
-    """各マスクの点の番号（valid_idx の何番目か）．m[v_v, v_u] が真の番号と同じ．"""
-    stack = ck.stack_masks(masks)
-    return stack, ck.gather_indices(stack, _index_image(pts, valid_idx, v_u, v_v, masks[0].shape))
+    """各マスクの点の番号（valid_idx の何番目か）．m[v_v, v_u] が真の番号と同じ．
+
+    同じ点群・同じマスク（同じ配列オブジェクト）の組なら，計算を1回だけ行う（距離行列と CAD 寸法の確認で同じものを使う）．
+    """
+    def make():
+        stack = ck.stack_masks(masks)
+        return list(masks), stack, ck.gather_indices(stack, _index_image(pts, valid_idx, v_u, v_v, masks[0].shape))
+    key = ("frag_idx", tuple(id(m) for m in masks))
+    held, stack, idx = POINT_CACHE.get(pts, valid_idx, key, make)
+    if len(held) != len(masks) or any(a is not b for a, b in zip(held, masks)):   # 念のため（保持しているので通常は一致）
+        held, stack, idx = make()
+    return stack, idx
 
 
 def distance_matrix_cpp(masks, pts, valid_idx, v_u, v_v, cfg: Config):
@@ -29,12 +38,7 @@ def distance_matrix_cpp(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     stack, idx = fragment_indices(masks, pts, valid_idx, v_u, v_v)
     frag = [pts[valid_idx[ix]] for ix in idx]
 
-    centers, axes = [], []
-    for p in frag:
-        c = np.mean(p, axis=0)
-        _, _, Vt = np.linalg.svd(p - c, full_matrices=False)
-        centers.append(c)
-        axes.append(Vt[0])
+    centers, axes = ck.fragment_pca(frag)   # 重心と第1主軸を C++ でまとめて計算する
 
     N = None
     if cfg.hier_normal_check or (cfg.use_cylinder_axis and cfg.fast_normals):
@@ -137,13 +141,13 @@ def attach_small_fragments_cpp(clusters, smalls, pts, valid_idx, v_u, v_v, cfg: 
     remaining = list(range(len(smalls)))
     while remaining:
         # 残っている小断片とまとまりの組の特徴をまとめて計算する（小断片 → まとまりの順に並べる）
-        ns = len(remaining)
-        stack = ck.stack_masks([smalls[si] for si in remaining] + clusters)
-        adjacent, gaps, nangle, _, _ = ck.pair_features(stack, cfg.adjacency_kernel, Z, N)
+        # 残っている小断片 × まとまり の組だけを計算する（小断片どうし・まとまりどうしの組は使わない）
+        adjacent, gaps, nangle = ck.pair_features_ab(ck.stack_masks([smalls[si] for si in remaining]),
+                                                     ck.stack_masks(clusters), cfg.adjacency_kernel, Z, N)
         best = None
         for a, si in enumerate(remaining):
             for ci in range(len(clusters)):
-                b = ns + ci
+                b = ci
                 if not adjacent[a, b]:
                     continue
                 if np.isnan(gaps[a, b]) or gaps[a, b] >= cfg.stage2_depth_thresh:
@@ -157,7 +161,7 @@ def attach_small_fragments_cpp(clusters, smalls, pts, valid_idx, v_u, v_v, cfg: 
                     continue
                 if limit is not None:
                     ext = principal_extent(np.vstack([sub_points(smalls[si]), sub_points(clusters[ci])]),
-                                           cfg.extent_percentile)
+                                           cfg.extent_percentile, use_cpp=True)
                     if np.any(ext[:2] > limit):
                         continue
                 best = (cost, si, ci)
