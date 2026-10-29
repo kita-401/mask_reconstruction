@@ -12,6 +12,7 @@
   /pose/models            : 各部品のモデル点群（MarkerArray，part_<k> 座標系）
 
 セグメンテーションは export_masks.py の METHODS の設定，姿勢推定は既存の SVD+ICP（カメラ側半分のモデル）．
+--symmetric-color なら，計測点群の特異値の比 s2/s1 が大きい（回転対称な）部品は色情報を用いた位置合わせ（野球ボールのモデル，pose_estimation/color_registration.py），それ以外は従来の位置合わせ（T字パイプ）．
 既存コードは読み込んで使うだけで変更しない．
 """
 import argparse
@@ -49,6 +50,14 @@ from pose_estimation.frames import Frame  # noqa: E402
 from pose_estimation.pointcloud import enough_points, load_model, mask_to_points, preprocess  # noqa: E402
 from pose_estimation.registration_gpu import GPUBatchRegistration  # noqa: E402
 from pose_estimation.visualization import draw_poses  # noqa: E402
+from pose_estimation.color_registration import V_SIZE as COLOR_V_SIZE  # noqa: E402
+from pose_estimation.color_registration import mask_to_colored_points, symmetry_ratio  # noqa: E402
+
+
+def o3d_voxel(points, voxel):
+    """点 (N, 3) をボクセルで間引く．"""
+    import open3d as o3d
+    return np.asarray(o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points)).voxel_down_sample(voxel).points)
 
 def make_sample(rgb, depth, intr, patch=14):
     """撮影画像を load_sample と同じ形（14 の倍数に縮小，内部パラメータも合わせる）にする．"""
@@ -213,6 +222,15 @@ class LivePoseNode(Node):
             self.masknet = MaskSVD(replace(MaskSVDConfig(model_path=model_path), normalize_scale=True,
                                            center_inputs=True, flip_mode="search", icp_threshold=0.01,
                                            model_voxel=args.model_voxel if args.model_voxel > 0 else self.pc.voxel_size))
+        self.color_reg = None
+        if args.symmetric_color:
+            # 回転対称な物体：色付きモデル（元のコードと同じ 1 mm で間引く）と，表示・評価用の形状だけのモデル
+            from pose_estimation.color_registration import ColorEdgeRegistration, load_colored_model
+            self.color_reg = ColorEdgeRegistration()
+            self.sym_model = load_colored_model(args.symmetric_model)
+            self.sym_model_xyz = np.asarray(o3d_voxel(self.sym_model[:, :3], self.pc.voxel_size))
+            self.get_logger().info(f"回転対称な物体（s2/s1 ≥ {args.symmetric_ratio}）は色で位置合わせ："
+                                   f"{Path(args.symmetric_model).name}（{len(self.sym_model)} 点）")
         from mask_reconstruction.cad_prior import load_cad_prior
         self.cad = load_cad_prior(cfg)   # 部品1個の大きさ（CAD から自動で求めた L1〜L3，最大の正射影面積）
         self.model_vis = self.model[::3]
@@ -286,6 +304,7 @@ class LivePoseNode(Node):
         poses, rows = [], []
         t1 = time.perf_counter()
         clouds, skipped, oversized = {}, [], []
+        sym_clouds = {}   # 回転対称とみなした部品の色付き点群（--symmetric-color）
         for i, m in enumerate(masks):
             p = mask_to_points(m, frame, self.pc)
             if len(p) < self.pc.min_points:
@@ -295,6 +314,14 @@ class LivePoseNode(Node):
                 oversized.append(i)
                 continue
             p = preprocess(p, self.pc)
+            if self.color_reg is not None and symmetry_ratio(p) >= self.args.symmetric_ratio:
+                # 第1・第2主成分がほぼ同じ → 回転対称な物体．点数の比は回転対称な物体のモデルに対して判定する
+                cp = mask_to_colored_points(m, frame, self.pc, COLOR_V_SIZE)
+                if self.pc.min_model_ratio <= 0 or len(cp) >= self.pc.min_model_ratio * len(self.sym_model):
+                    sym_clouds[i] = cp
+                else:
+                    skipped.append(i)
+                continue
             if enough_points(p, self.pc):
                 clouds[i] = p
             else:            # 一部しか見えていない（奥に隠れている）部品は位置合わせしない
@@ -307,6 +334,7 @@ class LivePoseNode(Node):
             n_dropped = len(masks) - len(keep)
             masks = [masks[i] for i in keep]
             clouds = {new[i]: p for i, p in clouds.items()}
+            sym_clouds = {new[i]: p for i, p in sym_clouds.items()}
             oversized = [new[i] for i in oversized]
             skipped = []
         t_prep = time.perf_counter() - t1
@@ -330,6 +358,17 @@ class LivePoseNode(Node):
             results = dict(zip(clouds, self.reg.batch(self.model, list(clouds.values()))))
         else:
             results = {i: self.reg(self.model, p) for i, p in clouds.items()}
+        t_sym = 0.0
+        if sym_clouds:
+            from pose_estimation.registration_svd import RegistrationResult
+            t3 = time.perf_counter()
+            for i, cp in sym_clouds.items():
+                T = self.color_reg(self.sym_model, cp)
+                results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=self.color_reg.last_fitness,
+                                                icp_fitness=self.color_reg.last_icp_fitness,
+                                                icp_rmse=float("nan"), flip=[])
+            t_sym = time.perf_counter() - t3
+        part_models = {i: self.sym_model_xyz for i in sym_clouds}   # 部品ごとのモデル（なければ T字パイプ）
         t_reg = time.perf_counter() - t2
         for i in range(len(masks)):
             r = results.get(i)
@@ -338,8 +377,8 @@ class LivePoseNode(Node):
                 continue
             T = r.T_model_to_cam
             poses.append(T)
-            rows.append(dict(id=i, T=T.tolist(), icp_fitness=r.icp_fitness,
-                             fsv=free_space_violation(self.model, T, frame, self.pc.depth_scale)))
+            rows.append(dict(id=i, T=T.tolist(), icp_fitness=r.icp_fitness, symmetric=i in sym_clouds,
+                             fsv=free_space_violation(part_models.get(i, self.model), T, frame, self.pc.depth_scale)))
         t_pose = time.perf_counter() - t1
         # マスクの ID：--track-ids なら，フレームが変わっても同じパイプに同じ ID を付ける．なければマスクの番号
         self.cur_ids = self.id_tracker.assign(masks) if self.id_tracker is not None else list(range(len(masks)))
@@ -351,7 +390,7 @@ class LivePoseNode(Node):
         t_pub0 = time.perf_counter()
         job = dict(frame=frame, poses=poses, masks=masks, skipped=list(skipped), oversized=list(oversized),
                    named=named, stamp=stamp, k=k, t_seg=t_seg, t_pose=t_pose, s=s, ids=list(self.cur_ids),
-                   crops=crops if self.masknet is not None else None, clouds=clouds)
+                   crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models)
         if self.display_queue is not None:   # 表示は別スレッドで（推定の待ち時間に含めない）
             try:
                 self.display_queue.get_nowait()   # まだ表示していない古いデータは捨てる
@@ -369,9 +408,11 @@ class LivePoseNode(Node):
             f"統合 {lt.get('merge', 0)*1000:.0f} / 姿勢用点群化 {t_prep*1000:.0f} / 位置合わせ {t_reg*1000:.0f} / "
             f"評価 {(t_pose - t_prep - t_reg)*1000:.0f} / 表示の配信 {t_pub*1000:.0f} / "
             f"合計 {(time.perf_counter() - t_all0)*1000:.0f}")
+        sym_log = (f"（うち回転対称で色の位置合わせ {len(sym_clouds)} 個 {t_sym*1000:.0f}ms）"
+                   if self.color_reg is not None else "")
         self.get_logger().info(f"#{k}: マスク {len(masks)} 個，姿勢 {len(named)} 個（点が少なく推定しない {len(skipped)} 個，"
                                f"点が少なく出力しないマスク {n_dropped} 個，"
-                               f"大きすぎて推定しない {len(oversized)} 個）"
+                               f"大きすぎて推定しない {len(oversized)} 個）{sym_log}"
                                f"（セグメンテーション {t_seg*1000:.0f}ms，姿勢推定 {t_pose*1000:.0f}ms "
                                f"= 点群化 {t_prep*1000:.0f} + 位置合わせ {t_reg*1000:.0f} + 評価）")
         if self.save_dir is not None:
@@ -400,7 +441,8 @@ class LivePoseNode(Node):
     def publish_display(self, j):
         """推定結果の画像・セグメンテーション画像と点群・モデル点群などを RViz2 へ配信する．"""
         frame, poses, masks, skipped, oversized = j["frame"], j["poses"], j["masks"], j["skipped"], j["oversized"]
-        overlay = draw_poses(frame, self.model, poses, masks)   # 色は RViz のモデル表示と同じ（部品の番号順）
+        overlay = draw_poses(frame, self.model, poses, masks,   # 色は RViz のモデル表示と同じ（部品の番号順）
+                             models=j.get("part_models"))
         for i in skipped + oversized:   # 位置合わせしなかった部品は輪郭を灰色で上書き
             cnts, _ = cv2.findContours(masks[i].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(overlay, cnts, -1, (150, 150, 150), 2)
@@ -409,7 +451,9 @@ class LivePoseNode(Node):
                     (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_overlay.publish(image_msg(overlay, j["stamp"]))
         self.publish_segmentation(j["s"], masks, skipped, j["stamp"], oversized, ids=j["ids"])
-        self.publish_models(j["named"], len(poses), j["stamp"])
+        ids = j["ids"]
+        vis = {f"part_{ids[i]}": pts[::3] for i, pts in (j.get("part_models") or {}).items()}
+        self.publish_models(j["named"], len(poses), j["stamp"], models=vis)
         if j["crops"] is not None:
             self.publish_masknet(j["crops"], j["clouds"], poses, j["stamp"], ids=j["ids"])
 
@@ -498,7 +542,8 @@ class LivePoseNode(Node):
         m = np.vstack(meas) if meas else np.zeros((0, 3))
         self.pub_meas.publish(points_msg(m, np.full((len(m), 3), 255, np.uint8), stamp))
 
-    def publish_models(self, named, n, stamp):
+    def publish_models(self, named, n, stamp, models=None):
+        """各部品のモデル点群．models: 部品名 → モデル点群（含まれない部品は T字パイプ）．"""
         arr = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL
@@ -512,7 +557,8 @@ class LivePoseNode(Node):
             mk.scale.x = mk.scale.y = 0.002
             mk.color = ColorRGBA(r=r / 255, g=g / 255, b=b / 255, a=0.9)
             mk.pose.orientation.w = 1.0
-            mk.points = [Point(x=float(x), y=float(y), z=float(z)) for x, y, z in self.model_vis]
+            pts = (models or {}).get(name, self.model_vis)
+            mk.points = [Point(x=float(x), y=float(y), z=float(z)) for x, y, z in pts]
             arr.markers.append(mk)
         self.pub_models.publish(arr)
 
@@ -553,6 +599,13 @@ def main():
                     help="見えている長さか実面積が CAD の (1+この値) 倍を超えるマスクは推定しない（0 以下で判定しない）")
     ap.add_argument("--min-model-ratio", type=float, default=0.25,
                     help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
+    ap.add_argument("--symmetric-color", action="store_true",
+                    help="計測点群の特異値の比 s2/s1 が --symmetric-ratio 以上の部品を回転対称（野球ボール）とみなし，"
+                         "色情報を用いた位置合わせ（color_registration.py）で推定する．それ以外は従来の位置合わせ（T字パイプ）")
+    ap.add_argument("--symmetric-ratio", type=float, default=0.85,
+                    help="回転対称とみなす特異値の比 s2/s1（第2主成分 / 第1主成分）の下限")
+    ap.add_argument("--symmetric-model", default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball.pcd"),
+                    help="回転対称な物体の色付きモデル点群（既定は color_Registration の ball_PCD2.pcd と同じもの）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")

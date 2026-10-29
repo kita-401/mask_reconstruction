@@ -372,6 +372,30 @@ python scripts/run_pose_estimation.py --masks gt baseline proposed
 新しいセグメンテーション設定を試すときは `export_masks.py` の `METHODS` に追加して書き出し，
 `--masks <その名前>` で姿勢推定するだけでよい．
 
+### 回転対称な物体の色情報を用いた位置合わせ（実機，`--symmetric-color`，2026-10-29）
+
+`color_Registration/scripts/color_Registration_edge.py`（色エッジによる回転対称物体の位置合わせ）を
+`pose_estimation/color_registration.py` に移植し，実機の推定ノードに組み込んだ．
+
+1. セグメント → マスクごとに計測点群（2 mm で間引き・外れ値除去後）の特異値の比 s2/s1 を求める
+2. s2/s1 < `--symmetric-ratio`（既定 0.85）：従来の位置合わせ（T字パイプ，`--registration` の設定どおり）
+3. s2/s1 ≥ `--symmetric-ratio`：回転対称な物体とみなし，色付き点群（1 mm で間引き）を色情報で位置合わせ
+   （野球ボール，`pose_estimation/models/ball.pcd` = color_Registration の `ball_PCD2.pcd`）．
+   点の少ない部品の判定（`--min-model-ratio`）はボールのモデルの点数に対して行う
+
+```bash
+bash scripts/run_live_pose.sh --registration masknet --track-ids --symmetric-color
+```
+
+- 元のコードとの違い：`vlm_rag` では torch_cluster が読み込めないため，近傍探索を素の PyTorch（`torch.cdist`）にした
+  （半径内の近傍は近い順に最大 32 点）．Z 軸まわりの探索で最良の候補を初期回転の行列に上書きしながら次の候補を作る
+  元のコードの動きは，結果を再現するためそのまま残している
+- 確認：ボールのモデルを既知の姿勢に動かした 20 回はすべて復元（回転誤差の中央値 0.05°，約 40 ms）．
+  実機（T字パイプ 7〜9 個＋ボール 1 個）ではボールが毎フレーム色の位置合わせに回り，1 個 50〜75 ms．
+  推定画像でボールのモデルは輪郭に重なり，縫い目もおおむね重なる
+- 注意：T字パイプも見え方によって s2/s1 が 1 に近くなる（10配置の正解マスク 146 個中，0.85 以上が 4 個，0.90 以上が 2 個）．
+  そのときはボールとして位置合わせされる
+
 ### 評価指標（真値姿勢がないため）
 
 - **fitness / RMSE**：計測点のうち推定モデルから 3mm 以内の割合と，その RMSE
