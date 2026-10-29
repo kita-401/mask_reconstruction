@@ -2,7 +2,7 @@
 
 カメラノード（scripts/camera_node.py）の配信を受け取るので，先にカメラノードを起動しておく：
     ROS_DOMAIN_ID=11 ROS_LOCALHOST_ONLY=1 python scripts/camera_node.py
-    ROS_DOMAIN_ID=11 ROS_LOCALHOST_ONLY=1 python scripts/capture_ball_model.py --out pose_estimation/models/ball_d405.pcd
+    ROS_DOMAIN_ID=11 ROS_LOCALHOST_ONLY=1 python scripts/capture_ball_model.py --out pose_estimation/models/ball_d405_v5.pcd
 
 ボールは1個だけ，カメラの視野の中に置き，撮影中は動かさない．手順：
   1. 静止した状態で --frames 枚撮り，深度は画素ごとの中央値，色は平均にする（計測ノイズを減らす）

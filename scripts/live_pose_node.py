@@ -661,8 +661,7 @@ def main():
                     help="回転対称な物体の点群を作る深度．raw: センサの生の深度 / refined: セグメンテーションで使った深度"
                          "（既定では LingBot-Depth で補完したもの．--no-lingbot なら飛び値除去のみ）")
     ap.add_argument("--symmetric-model", default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball_d405_v2.pcd"),
-                    help="回転対称な物体の色付きモデル点群（既定は D405 で撮影したもの（capture_ball_model.py）．"
-                         "ball.pcd は color_Registration の ball_PCD2.pcd と同じもの）")
+                    help="回転対称な物体の色付きモデル点群（既定は D405 で撮影したもの（capture_ball_model.py））")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")

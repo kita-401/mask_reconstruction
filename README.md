@@ -380,7 +380,7 @@ python scripts/run_pose_estimation.py --masks gt baseline proposed
 1. セグメント → マスクごとに外形の円形度 4πA/P²（円で 1）を求める
 2. 円形度 < `--symmetric-circ`（既定 0.85）：従来の位置合わせ（T字パイプ，`--registration` の設定どおり）
 3. 円形度 ≥ `--symmetric-circ`：回転対称な物体とみなし，色付き点群（1 mm で間引き）を色情報で位置合わせ
-   （野球ボール，`pose_estimation/models/ball.pcd` = color_Registration の `ball_PCD2.pcd`）．
+   （野球ボール．当初は color_Registration の `ball_PCD2.pcd`，現在は D405 で撮影した `pose_estimation/models/ball_d405_v2.pcd`）．
    点の少ない部品の判定（`--min-model-ratio`）はボールのモデルの点数に対して行う
 
 ```bash
@@ -414,9 +414,9 @@ bash scripts/run_live_pose.sh --registration masknet --track-ids --symmetric-col
 - **計測点群のボクセル 1 → 0.5 mm**（`--symmetric-voxel`）：1 mm では約 2.7 画素四方の色を平均し，細い縫い目の色が薄まる
 - **D405 で撮影したモデル**（`scripts/capture_ball_model.py`，`--symmetric-model`）：15 フレームの深度の中央値・色の平均 → LingBot-Depth →
   円形度でボールのマスク → 0.5 mm 間隔の色付き点群 → 外れ値と球面から 3 mm 以上の点を除去．原点は球の中心，軸は撮影時のカメラの向き．
-  `ball_d405_v2.pcd`（既定，7478 点，球面からの誤差 1.23 mm）・`ball_d405.pcd`・`ball_d405_v3.pcd` は撮影距離約 32 cm．
-  元のモデル（`ball.pcd`）は色の幅が狭く（0.3〜0.7）縫い目が不鮮明．縫い目の距離（ボール 1 個×6 フレーム）は
-  `ball.pcd` 5.96 / 3.07 px に対し D405 のモデル 1.85〜2.01 px
+  `ball_d405_v2.pcd`（既定，7478 点，球面からの誤差 1.23 mm，撮影距離約 32 cm）．4 回撮影し，縁の欠けや照り返しの抜けが
+  最も少ないものを残した（他は削除）．元のモデル（color_Registration の `ball_PCD2.pcd`）は色の幅が狭く（0.3〜0.7）縫い目が不鮮明．
+  縫い目の距離（ボール 1 個×6 フレーム）は元のモデル 5.96 / 3.07 px に対し D405 のモデル 1.85〜2.01 px
 - 効果がなかったもの：細かい探索の刻み 2° → 0.5°，探索の上書きの修正（`fix_search`），色も使う ICP（`refine="colored_icp"`，ときどき大きく外れる）．
   いずれも `ColorEdgeRegistration` の引数として残している（既定は元のコードと同じ）
 - 残っている問題：静止したボールでも姿勢が 4〜12° ばらつく．モデルはボールの片面だけなので，違う面がカメラを向いたボールには合わない
