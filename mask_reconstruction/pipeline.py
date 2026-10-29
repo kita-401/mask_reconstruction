@@ -47,6 +47,7 @@ class MaskReconstructor:
         sync()
         times["FastSAM"], t = time.perf_counter() - t, time.perf_counter()
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
+        self.last_depth = depth_mm   # 統合に使った深度 [mm]（LingBot-Depth の補完後など）．姿勢推定側で使えるように残す
         sync()
         times["depth"], t = time.perf_counter() - t, time.perf_counter()
         if self.cfg.use_gpu_ops:   # 同じ点群を GPU で計算する（gpu_ops.py）

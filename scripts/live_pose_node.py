@@ -10,6 +10,8 @@
   /tf                     : 各部品の姿勢 part_<k>（モデル座標 → カメラ）
   /pose/overlay           : 推定結果（マスク輪郭・モデル点・座標軸）を重ねた画像（推定ごと）
   /pose/models            : 各部品のモデル点群（MarkerArray，part_<k> 座標系）
+  /pose/ball_models       : 位置合わせ後のボールのモデル点群（モデルの色，--symmetric-color のとき）
+  /pose/ball_measured     : ボールの位置合わせに使った計測点群（カメラの色，--symmetric-color のとき）
 
 セグメンテーションは export_masks.py の METHODS の設定，姿勢推定は既存の SVD+ICP（カメラ側半分のモデル）．
 --symmetric-color なら，マスクの外形が円に近い（回転対称な）部品は色情報を用いた位置合わせ（野球ボールのモデル，pose_estimation/color_registration.py），それ以外は従来の位置合わせ（T字パイプ）．
@@ -50,7 +52,6 @@ from pose_estimation.frames import Frame  # noqa: E402
 from pose_estimation.pointcloud import enough_points, load_model, mask_to_points, preprocess  # noqa: E402
 from pose_estimation.registration_gpu import GPUBatchRegistration  # noqa: E402
 from pose_estimation.visualization import draw_poses  # noqa: E402
-from pose_estimation.color_registration import V_SIZE as COLOR_V_SIZE  # noqa: E402
 from pose_estimation.color_registration import CIRCULARITY_MIN, mask_circularity, mask_to_colored_points  # noqa: E402
 
 
@@ -166,6 +167,8 @@ class LivePoseNode(Node):
         self.pub_seg_cloud = self.create_publisher(PointCloud2, "/pose/segmented_points", 2)  # マスクごとに色分けした点群
         self.pub_crop = self.create_publisher(PointCloud2, "/pose/masknet_models", 2)     # MaskNet で削ったモデル
         self.pub_meas = self.create_publisher(PointCloud2, "/pose/measured_points", 2)    # 位置合わせに使った計測点群
+        self.pub_ball_model = self.create_publisher(PointCloud2, "/pose/ball_models", 2)  # 位置合わせ後のボールのモデル（色付き）
+        self.pub_ball_meas = self.create_publisher(PointCloud2, "/pose/ball_measured", 2) # ボールの位置合わせに使った計測点群（色付き）
         self.poses = []                # [(name, T)]
         self.pose_lock = threading.Lock()
         self.create_timer(0.1, self.publish_tf)   # 最新の姿勢を 10Hz で配信し続ける（RViz で古くならないように）
@@ -213,7 +216,8 @@ class LivePoseNode(Node):
         self.display_queue = None
         if not args.sync_display:
             self.display_queue = queue.Queue(maxsize=1)
-            threading.Thread(target=self.display_loop, daemon=True).start()
+            self.display_thread = threading.Thread(target=self.display_loop, daemon=True)
+            self.display_thread.start()
         self.masknet = None
         if args.registration == "masknet":
             # 全周モデルを MaskNet で計測点群に合わせて削り，削ったモデルで SVD（符号探索）+ ICP（masksvd_exp）．
@@ -226,9 +230,13 @@ class LivePoseNode(Node):
         if args.symmetric_color:
             # 回転対称な物体：色付きモデル（元のコードと同じ 1 mm で間引く）と，表示・評価用の形状だけのモデル
             from pose_estimation.color_registration import ColorEdgeRegistration, load_colored_model
-            self.color_reg = ColorEdgeRegistration()
-            self.sym_model = load_colored_model(args.symmetric_model)
+            self.color_reg = ColorEdgeRegistration(facing_check=True)   # 表裏を確認する（膨らんだ側がカメラを向く候補）
+            self.sym_model = load_colored_model(args.symmetric_model, voxel=args.symmetric_model_voxel)
             self.sym_model_xyz = np.asarray(o3d_voxel(self.sym_model[:, :3], self.pc.voxel_size))
+            # 表示用のモデルの色：モデルの色は暗く幅が狭い（0.3〜0.7）ので，縫い目が見えるよう明るさの幅を広げる（BGR）
+            c = self.sym_model[:, 3:6]
+            c = (c - c.min(0)) / np.maximum(c.max(0) - c.min(0), 1e-6)
+            self.sym_model_bgr = (c[:, ::-1] * 255).astype(np.uint8)
             self.get_logger().info(f"回転対称な物体（マスクの円形度 ≥ {args.symmetric_circ}）は色で位置合わせ："
                                    f"{Path(args.symmetric_model).name}（{len(self.sym_model)} 点）")
         from mask_reconstruction.cad_prior import load_cad_prior
@@ -301,6 +309,10 @@ class LivePoseNode(Node):
         t_seg = time.perf_counter() - t0
         K = np.array([[s.fx, 0, s.cx], [0, s.fy, s.cy], [0, 0, 1]])
         frame = Frame(rgb=s.rgb, depth=s.depth, K=K)
+        # 回転対称な物体の点群に使う深度：refined＝セグメンテーションで使った深度（既定では LingBot-Depth の補完後）
+        frame_sym = frame
+        if self.args.symmetric_depth == "refined" and getattr(self.recon, "last_depth", None) is not None:
+            frame_sym = Frame(rgb=s.rgb, depth=self.recon.last_depth, K=K)
         poses, rows = [], []
         t1 = time.perf_counter()
         clouds, skipped, oversized = {}, [], []
@@ -316,7 +328,7 @@ class LivePoseNode(Node):
             p = preprocess(p, self.pc)
             if self.color_reg is not None and mask_circularity(m) >= self.args.symmetric_circ:
                 # マスクの外形が円に近い → 回転対称な物体．点数の比はそのモデルに対して判定する
-                cp = mask_to_colored_points(m, frame, self.pc, COLOR_V_SIZE)
+                cp = mask_to_colored_points(m, frame_sym, self.pc, self.args.symmetric_voxel)
                 if self.pc.min_model_ratio <= 0 or len(cp) >= self.pc.min_model_ratio * len(self.sym_model):
                     sym_clouds[i] = cp
                 else:
@@ -390,7 +402,8 @@ class LivePoseNode(Node):
         t_pub0 = time.perf_counter()
         job = dict(frame=frame, poses=poses, masks=masks, skipped=list(skipped), oversized=list(oversized),
                    named=named, stamp=stamp, k=k, t_seg=t_seg, t_pose=t_pose, s=s, ids=list(self.cur_ids),
-                   crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models)
+                   crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models,
+                   sym_clouds=sym_clouds)
         if self.display_queue is not None:   # 表示は別スレッドで（推定の待ち時間に含めない）
             try:
                 self.display_queue.get_nowait()   # まだ表示していない古いデータは捨てる
@@ -428,6 +441,21 @@ class LivePoseNode(Node):
                 json.dump(dict(seg_ms=t_seg * 1000, pose_ms=t_pose * 1000, parts=rows), f, indent=1)
         return True
 
+    def stop_display(self, timeout=5.0):
+        """表示のスレッドを止めて終わるのを待つ（終了時用）．
+
+        デーモンスレッドが cv2 の処理中にインタプリタが終わると，"FATAL: exception not rethrown" で異常終了するため．
+        まだ表示していないデータは捨てる．
+        """
+        if self.display_queue is None:
+            return
+        try:
+            self.display_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self.display_queue.put(None)
+        self.display_thread.join(timeout)
+
     def display_loop(self):
         while True:
             job = self.display_queue.get()
@@ -456,6 +484,26 @@ class LivePoseNode(Node):
         self.publish_models(j["named"], len(poses), j["stamp"], models=vis)
         if j["crops"] is not None:
             self.publish_masknet(j["crops"], j["clouds"], poses, j["stamp"], ids=j["ids"])
+        if self.color_reg is not None:
+            self.publish_balls(j["sym_clouds"], poses, j["stamp"])
+
+    def publish_balls(self, sym_clouds, poses, stamp):
+        """位置合わせ後のボールのモデル（推定姿勢でカメラ座標に置き，モデルの色）と，位置合わせに使った計測点群（カメラの色）．
+
+        2つの縫い目が重なっていれば，回転も合っている．
+        """
+        pts, cols, meas, mcols = [], [], [], []
+        for i, cp in sym_clouds.items():
+            T = poses[i]
+            if T is None:
+                continue
+            pts.append(self.sym_model[:, :3] @ T[:3, :3].T + T[:3, 3])
+            cols.append(self.sym_model_bgr)
+            meas.append(cp[:, :3])
+            mcols.append((cp[:, 3:6][:, ::-1] * 255).astype(np.uint8))
+        empty = (np.zeros((0, 3)), np.zeros((0, 3), np.uint8))
+        self.pub_ball_model.publish(points_msg(*((np.vstack(pts), np.vstack(cols)) if pts else empty), stamp))
+        self.pub_ball_meas.publish(points_msg(*((np.vstack(meas), np.vstack(mcols)) if meas else empty), stamp))
 
     def too_big(self, m, p, s):
         """マスクが部品1個として大きすぎるか：見えている点の主軸方向の長さか実面積が，CAD の値の (1+m) 倍を超える．
@@ -604,8 +652,17 @@ def main():
                          "色情報を用いた位置合わせ（color_registration.py）で推定する．それ以外は従来の位置合わせ（T字パイプ）")
     ap.add_argument("--symmetric-circ", type=float, default=CIRCULARITY_MIN,
                     help="回転対称とみなすマスクの外形の円形度の下限（円で 1）")
-    ap.add_argument("--symmetric-model", default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball.pcd"),
-                    help="回転対称な物体の色付きモデル点群（既定は color_Registration の ball_PCD2.pcd と同じもの）")
+    ap.add_argument("--symmetric-voxel", type=float, default=0.0005,
+                    help="回転対称な物体の色付き計測点群を間引くボクセルの辺長 [m]（元のコードは 1 mm．"
+                         "小さいほど縫い目の色が周りと混ざらない．約 16 cm の距離で 1 画素は約 0.37 mm）")
+    ap.add_argument("--symmetric-model-voxel", type=float, default=0.0005,
+                    help="回転対称な物体のモデル点群を読み込むときに間引くボクセルの辺長 [m]（元のコードは 1 mm）")
+    ap.add_argument("--symmetric-depth", choices=["raw", "refined"], default="refined",
+                    help="回転対称な物体の点群を作る深度．raw: センサの生の深度 / refined: セグメンテーションで使った深度"
+                         "（既定では LingBot-Depth で補完したもの．--no-lingbot なら飛び値除去のみ）")
+    ap.add_argument("--symmetric-model", default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball_d405_v2.pcd"),
+                    help="回転対称な物体の色付きモデル点群（既定は D405 で撮影したもの（capture_ball_model.py）．"
+                         "ball.pcd は color_Registration の ball_PCD2.pcd と同じもの）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")
     ap.add_argument("--no-plane-removal", action="store_true", help="平面除去による背景断片の除去をしない")
     ap.add_argument("--save", action="store_true", help="推定ごとに RGB・深度・マスク・姿勢を results/live/ に保存")
@@ -618,7 +675,12 @@ def main():
         threadpool_limits(limits=args.blas_threads, user_api="blas")
     rclpy.init(args=ros_args)
     node = LivePoseNode(args)
-    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+    # 受信のスレッドは，終了時に止めて待てるよう専用の executor で回す
+    from rclpy.executors import SingleThreadedExecutor
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
     k = 0
     try:
         while rclpy.ok() and (args.max_frames <= 0 or k < args.max_frames):
@@ -629,6 +691,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # 別スレッドを止めてから終える（動いたままインタプリタが終わると異常終了することがある）
+        node.stop_display()
+        executor.shutdown()
+        spin_thread.join(5.0)
         node.destroy_node()
         rclpy.try_shutdown()
 

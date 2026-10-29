@@ -71,9 +71,12 @@ def load_colored_model(path, voxel=V_SIZE):
 
 def _radius_neighbors(points, r):
     """各点の半径 r 以内の近傍（自分を含む，近い順に最大 MAX_NEIGHBORS 点）．(index [N, k], 有効 [N, k])．"""
-    d = torch.cdist(points, points)
     k = min(MAX_NEIGHBORS, points.shape[0])
-    dist, idx = torch.topk(d, k, dim=1, largest=False)
+    dists, idxs = [], []
+    for i in range(0, points.shape[0], 4096):   # 点が多くてもメモリが足りるよう，行を分けて求める（結果は同じ）
+        dist, idx = torch.topk(torch.cdist(points[i:i + 4096], points), k, dim=1, largest=False)
+        dists.append(dist); idxs.append(idx)
+    dist, idx = torch.cat(dists), torch.cat(idxs)
     return idx, dist <= r
 
 
@@ -114,6 +117,13 @@ def principal_vectors(points):
     return basis, s
 
 
+def _sphere_center(points):
+    """点群 (N, 3) に当てはめた球の中心（最小二乗）．"""
+    A = np.hstack([2 * points, np.ones((len(points), 1))])
+    x, *_ = np.linalg.lstsq(A, (points ** 2).sum(1), rcond=None)
+    return x[:3]
+
+
 def _fitness(source, target, threshold):
     d = torch.cdist(source, target).min(dim=1).values
     return (d < threshold).float().mean()
@@ -128,7 +138,27 @@ def _rot_z(angle_deg, device):
 class ColorEdgeRegistration:
     """色エッジによる回転対称物体の位置合わせ．__call__(model (M, 6), measured (N, 6)) → (4, 4) モデル → カメラ．"""
 
-    def __init__(self, icp_threshold=0.01, icp_max_iteration=30, device=None):
+    def __init__(self, icp_threshold=0.01, icp_max_iteration=30, device=None,
+                 fine_step=2.0, fix_search=False, refine="icp", colored_icp_lambda=0.968,
+                 smooth_rad=SMOOTH_RAD, edge_rad=EDGE_RAD, edge_percent=EDGE_PERCENT, fit_threshold=V_SIZE * 5,
+                 facing_check=False):
+        """fine_step: Z 軸まわりの細かい探索の刻み [deg]（元のコードは 2°）
+        fix_search: True なら細かい探索の候補を常に初期回転から作る（元のコードは最良の候補で初期回転を上書きする）
+        refine: 最後の精密化．"icp"＝形だけの Point-to-Point ICP（元のコード），"colored_icp"＝色も使う ICP
+                （Park et al. 2017，Open3D）．球面は形だけでは中心まわりの回転が決まらないため
+                "none"＝精密化しない（比較用）
+        colored_icp_lambda: colored_icp での形の項の重み（1 で形だけ，0 で色だけ）
+        smooth_rad / edge_rad / edge_percent: 色の平滑化の半径・色の勾配を求める半径 [m]・色エッジ点の割合
+        fit_threshold: Z 軸まわりの探索で，色エッジ点どうしが重なったとみなす距離 [m]
+        facing_check: True なら表裏を確認する．モデル（ボールのカメラ側の面）の膨らんだ側がカメラを向く候補だけを選ぶ
+                      （元のコードは，第2主軸まわりに 180° 反転した候補との選択を色エッジの重なりだけで決める）
+        """
+        self.facing_check = facing_check
+        self.last_facing = None   # 選んだ候補がカメラを向いていたか（facing_check のとき）
+        self.smooth_rad, self.edge_rad, self.edge_percent = smooth_rad, edge_rad, edge_percent
+        self.fit_threshold = fit_threshold
+        self.fine_step, self.fix_search, self.refine = fine_step, fix_search, refine
+        self.colored_icp_lambda = colored_icp_lambda
         self.icp_threshold = icp_threshold
         self.criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=icp_max_iteration)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,25 +169,28 @@ class ColorEdgeRegistration:
         p, c = t[:, :3], t[:, 3:6]
         mean = p.mean(0, keepdim=True)
         p = p - mean
-        c = smooth_colors_by_radius(p, c, SMOOTH_RAD)
-        ep, _ = get_color_edge_points(p, c, EDGE_RAD, EDGE_PERCENT)
+        if self.smooth_rad > 0:
+            c = smooth_colors_by_radius(p, c, self.smooth_rad)
+        ep, _ = get_color_edge_points(p, c, self.edge_rad, self.edge_percent)
         return p, c, ep, mean
 
     def _axis_search(self, T_init, source_edge, model_edge):
-        threshold = V_SIZE * 5
+        threshold = self.fit_threshold
         step_c, range_c = 30.0, 180.0
         best_fit, best_angle = -1.0, 0.0
-        best = T_init   # 元のコードと同じく，初期回転の行列そのものに最良の候補を上書きしていく
+        # 元のコードと同じく，初期回転の行列そのものに最良の候補を上書きしていく（fix_search なら上書きしない）
+        best = T_init.clone() if self.fix_search else T_init
+        R_base = T_init[:3, :3].clone()
         for angle in np.arange(-range_c, range_c, step_c):
-            R = _rot_z(angle, self.device) @ T_init[:3, :3]
+            R = _rot_z(angle, self.device) @ (R_base if self.fix_search else T_init[:3, :3])
             fit = _fitness(source_edge @ R.T, model_edge, threshold)
             if fit > best_fit:
                 best_fit, best_angle = fit, angle
                 best[:3, :3] = R
-        for angle in np.arange(best_angle - step_c, best_angle + step_c, 2.0):
+        for angle in np.arange(best_angle - step_c, best_angle + step_c, self.fine_step):
             if angle == best_angle:
                 continue
-            R = _rot_z(angle, self.device) @ T_init[:3, :3]
+            R = _rot_z(angle, self.device) @ (R_base if self.fix_search else T_init[:3, :3])
             fit = _fitness(source_edge @ R.T, model_edge, threshold)
             if fit > best_fit:
                 best_fit = fit
@@ -181,15 +214,45 @@ class ColorEdgeRegistration:
         T_a, fit_a = self._axis_search(T0, se, me)
         T_b, fit_b = self._axis_search(T0_flip, se, me)
         T_init, self.last_fitness = (T_b, fit_b) if fit_b > fit_a else (T_a, fit_a)
+        if self.facing_check:
+            # モデル座標での「膨らんだ側」の向き：球の中心から，お椀（モデル点群）の重心へ
+            mp_np = mp.detach().cpu().numpy().astype(np.float64)
+            out_dir = -_sphere_center(mp_np)
+            out_dir /= max(np.linalg.norm(out_dir), 1e-9)
+            cam = -s_mean.squeeze().detach().cpu().numpy()   # 重心で中心化した計測座標でのカメラの位置
+
+            def facing(T):   # その候補で，カメラがモデルの膨らんだ側にあるか
+                return float((T[:3, :3].detach().cpu().numpy() @ cam) @ out_dir) > 0
+
+            ok = [(T, f) for T, f in ((T_a, fit_a), (T_b, fit_b)) if facing(T)]
+            if len(ok) == 1:
+                T_init, self.last_fitness = ok[0]
+            self.last_facing = facing(T_init)
 
         def o3d_cloud(p, c):
             pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(p.detach().cpu().numpy().astype(np.float64)))
             pc.colors = o3d.utility.Vector3dVector(c.detach().cpu().numpy().astype(np.float64))
             return pc
 
-        reg = o3d.pipelines.registration.registration_icp(
-            o3d_cloud(sp, sc), o3d_cloud(mp, mc), self.icp_threshold, T_init.detach().cpu().numpy().astype(np.float64),
-            o3d.pipelines.registration.TransformationEstimationPointToPoint(), self.criteria)
+        src, tgt = o3d_cloud(sp, sc), o3d_cloud(mp, mc)
+        init = T_init.detach().cpu().numpy().astype(np.float64)
+        if self.refine == "colored_icp":
+            # 明るさの違い（モデルと計測で照明が違う）を除くため，それぞれ輝度を平均 0.5・標準偏差 0.15 にそろえる
+            for pc in (src, tgt):
+                g = np.asarray(pc.colors).mean(1)
+                g = 0.5 + 0.15 * (g - g.mean()) / max(g.std(), 1e-6)
+                pc.colors = o3d.utility.Vector3dVector(np.repeat(np.clip(g, 0, 1)[:, None], 3, 1))
+                pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=V_SIZE * 5, max_nn=30))
+            reg = o3d.pipelines.registration.registration_colored_icp(
+                src, tgt, self.icp_threshold, init,
+                o3d.pipelines.registration.TransformationEstimationForColoredICP(self.colored_icp_lambda), self.criteria)
+        elif self.refine == "none":   # 精密化しない（探索の結果のまま．比較用）
+            reg = o3d.pipelines.registration.evaluate_registration(src, tgt, self.icp_threshold, init)
+            reg.transformation = init
+        else:
+            reg = o3d.pipelines.registration.registration_icp(
+                src, tgt, self.icp_threshold, init,
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(), self.criteria)
         T = np.asarray(reg.transformation).copy()
         # 重心で中心化した分を戻す
         m0, s0 = m_mean.squeeze().cpu().numpy(), s_mean.squeeze().cpu().numpy()

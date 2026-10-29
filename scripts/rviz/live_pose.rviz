@@ -125,6 +125,28 @@ Visualization Manager:
       Size (Pixels): 2
       Color Transformer: RGB8
       Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: 位置合わせ後のボールのモデル
+      Enabled: true
+      Topic:
+        Value: /pose/ball_models
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: RGB8
+      Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: ボールの計測点群
+      Enabled: false
+      Topic:
+        Value: /pose/ball_measured
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: RGB8
+      Decay Time: 0
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 5
