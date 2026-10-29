@@ -12,7 +12,7 @@
   /pose/models            : 各部品のモデル点群（MarkerArray，part_<k> 座標系）
 
 セグメンテーションは export_masks.py の METHODS の設定，姿勢推定は既存の SVD+ICP（カメラ側半分のモデル）．
---symmetric-color なら，計測点群の特異値の比 s2/s1 が大きい（回転対称な）部品は色情報を用いた位置合わせ（野球ボールのモデル，pose_estimation/color_registration.py），それ以外は従来の位置合わせ（T字パイプ）．
+--symmetric-color なら，マスクの外形が円に近い（回転対称な）部品は色情報を用いた位置合わせ（野球ボールのモデル，pose_estimation/color_registration.py），それ以外は従来の位置合わせ（T字パイプ）．
 既存コードは読み込んで使うだけで変更しない．
 """
 import argparse
@@ -51,7 +51,7 @@ from pose_estimation.pointcloud import enough_points, load_model, mask_to_points
 from pose_estimation.registration_gpu import GPUBatchRegistration  # noqa: E402
 from pose_estimation.visualization import draw_poses  # noqa: E402
 from pose_estimation.color_registration import V_SIZE as COLOR_V_SIZE  # noqa: E402
-from pose_estimation.color_registration import mask_to_colored_points, symmetry_ratio  # noqa: E402
+from pose_estimation.color_registration import CIRCULARITY_MIN, mask_circularity, mask_to_colored_points  # noqa: E402
 
 
 def o3d_voxel(points, voxel):
@@ -229,7 +229,7 @@ class LivePoseNode(Node):
             self.color_reg = ColorEdgeRegistration()
             self.sym_model = load_colored_model(args.symmetric_model)
             self.sym_model_xyz = np.asarray(o3d_voxel(self.sym_model[:, :3], self.pc.voxel_size))
-            self.get_logger().info(f"回転対称な物体（s2/s1 ≥ {args.symmetric_ratio}）は色で位置合わせ："
+            self.get_logger().info(f"回転対称な物体（マスクの円形度 ≥ {args.symmetric_circ}）は色で位置合わせ："
                                    f"{Path(args.symmetric_model).name}（{len(self.sym_model)} 点）")
         from mask_reconstruction.cad_prior import load_cad_prior
         self.cad = load_cad_prior(cfg)   # 部品1個の大きさ（CAD から自動で求めた L1〜L3，最大の正射影面積）
@@ -314,8 +314,8 @@ class LivePoseNode(Node):
                 oversized.append(i)
                 continue
             p = preprocess(p, self.pc)
-            if self.color_reg is not None and symmetry_ratio(p) >= self.args.symmetric_ratio:
-                # 第1・第2主成分がほぼ同じ → 回転対称な物体．点数の比は回転対称な物体のモデルに対して判定する
+            if self.color_reg is not None and mask_circularity(m) >= self.args.symmetric_circ:
+                # マスクの外形が円に近い → 回転対称な物体．点数の比はそのモデルに対して判定する
                 cp = mask_to_colored_points(m, frame, self.pc, COLOR_V_SIZE)
                 if self.pc.min_model_ratio <= 0 or len(cp) >= self.pc.min_model_ratio * len(self.sym_model):
                     sym_clouds[i] = cp
@@ -600,10 +600,10 @@ def main():
     ap.add_argument("--min-model-ratio", type=float, default=0.25,
                     help="間引き後の計測点数が全周モデルの点数のこの割合未満の部品は位置合わせしない（0 で判定しない）")
     ap.add_argument("--symmetric-color", action="store_true",
-                    help="計測点群の特異値の比 s2/s1 が --symmetric-ratio 以上の部品を回転対称（野球ボール）とみなし，"
+                    help="マスクの外形の円形度 4πA/P^2 が --symmetric-circ 以上の部品を回転対称（野球ボール）とみなし，"
                          "色情報を用いた位置合わせ（color_registration.py）で推定する．それ以外は従来の位置合わせ（T字パイプ）")
-    ap.add_argument("--symmetric-ratio", type=float, default=0.85,
-                    help="回転対称とみなす特異値の比 s2/s1（第2主成分 / 第1主成分）の下限")
+    ap.add_argument("--symmetric-circ", type=float, default=CIRCULARITY_MIN,
+                    help="回転対称とみなすマスクの外形の円形度の下限（円で 1）")
     ap.add_argument("--symmetric-model", default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball.pcd"),
                     help="回転対称な物体の色付きモデル点群（既定は color_Registration の ball_PCD2.pcd と同じもの）")
     ap.add_argument("--no-cpp", action="store_true", help="C++ の基本処理を使わず Python 版で計算する")

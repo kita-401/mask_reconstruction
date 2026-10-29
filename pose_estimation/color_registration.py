@@ -27,12 +27,19 @@ EDGE_PERCENT = 0.05        # 色エッジ点群の割合
 MAX_NEIGHBORS = 32
 
 
-def symmetry_ratio(points):
-    """計測点群 (N, 3) の特異値の比 s2/s1（第2主成分 / 第1主成分）．1 に近いほど回転対称に近い．"""
-    if len(points) < 3:
+def mask_circularity(mask):
+    """マスクの外形の円形度 4πA / P^2（円で 1，細長い・枝分かれした形ほど小さい）．"""
+    cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
         return 0.0
-    s = np.linalg.svd(points - points.mean(0), compute_uv=False)
-    return float(s[1] / s[0]) if s[0] > 0 else 0.0
+    c = max(cnts, key=cv2.contourArea)
+    per = cv2.arcLength(c, True)
+    return float(4 * np.pi * cv2.contourArea(c) / per ** 2) if per > 0 else 0.0
+
+
+# 回転対称な物体（ボール）とみなすマスクの円形度の下限．T字パイプ（10配置の正解マスク 146 個）は最大 0.81，
+# 実機のボールは 0.88〜0.91（実機の T字パイプは 0.61 以下）なので，その間に置く
+CIRCULARITY_MIN = 0.85
 
 
 def mask_to_colored_points(mask, frame, cfg, voxel):
