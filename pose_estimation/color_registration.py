@@ -143,7 +143,7 @@ class ColorEdgeRegistration:
     def __init__(self, icp_threshold=0.01, icp_max_iteration=30, device=None,
                  fine_step=2.0, fix_search=False, refine="icp", colored_icp_lambda=0.968,
                  smooth_rad=SMOOTH_RAD, edge_rad=EDGE_RAD, edge_percent=EDGE_PERCENT, fit_threshold=V_SIZE * 5,
-                 facing_check=False):
+                 facing_check=False, icp_voxel=0.0):
         """fine_step: Z 軸まわりの細かい探索の刻み [deg]（元のコードは 2°）
         fix_search: True なら細かい探索の候補を常に初期回転から作る（元のコードは最良の候補で初期回転を上書きする）
         refine: 最後の精密化．"icp"＝形だけの Point-to-Point ICP（元のコード），"colored_icp"＝色も使う ICP
@@ -156,6 +156,8 @@ class ColorEdgeRegistration:
                       （元のコードは，第2主軸まわりに 180° 反転した候補との選択を色エッジの重なりだけで決める）
         """
         self.facing_check = facing_check
+        self.icp_voxel = icp_voxel   # >0：最後の ICP だけ，この辺長 [m] で間引いた粗い点群で行う（色エッジ・角度の探索は細かいまま）
+        self._model_cache = (None, None)   # (モデルの配列, その前処理の結果)：同じモデルなら前処理を使い回す
         self.last_facing = None   # 選んだ候補がカメラを向いていたか（facing_check のとき）
         self.smooth_rad, self.edge_rad, self.edge_percent = smooth_rad, edge_rad, edge_percent
         self.fit_threshold = fit_threshold
@@ -201,7 +203,12 @@ class ColorEdgeRegistration:
 
     def register(self, model, measured):
         """計測点群 → モデルの変換（元のコードの est_T と同じ向き）．"""
-        mp, mc, me, m_mean = self._prepare(model)
+        # モデル側の前処理（平滑化・色エッジ）は毎回同じなので，同じ配列のモデルなら使い回す（結果は同じ）
+        if self._model_cache[0] is model:
+            mp, mc, me, m_mean = self._model_cache[1]
+        else:
+            mp, mc, me, m_mean = self._prepare(model)
+            self._model_cache = (model, (mp, mc, me, m_mean))
         sp, sc, se, s_mean = self._prepare(measured)
         gm, _ = principal_vectors(mp)
         gs, _ = principal_vectors(sp)
@@ -237,6 +244,8 @@ class ColorEdgeRegistration:
             return pc
 
         src, tgt = o3d_cloud(sp, sc), o3d_cloud(mp, mc)
+        if self.icp_voxel > 0:
+            src, tgt = src.voxel_down_sample(self.icp_voxel), tgt.voxel_down_sample(self.icp_voxel)
         init = T_init.detach().cpu().numpy().astype(np.float64)
         if self.refine == "colored_icp":
             # 明るさの違い（モデルと計測で照明が違う）を除くため，それぞれ輝度を平均 0.5・標準偏差 0.15 にそろえる

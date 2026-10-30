@@ -55,6 +55,18 @@ from pose_estimation.visualization import draw_poses  # noqa: E402
 from pose_estimation.color_registration import CIRCULARITY_MIN, mask_circularity, mask_to_colored_points  # noqa: E402
 
 
+def force_z_axis(T, z=np.array([0.0, 0.0, 1.0])):
+    """姿勢 T の z 軸を z（カメラ座標）にそろえる．x 軸は T の x 軸を z に垂直な面に投影したもの（ほぼ z と平行なら y 軸を使う）．"""
+    R = T[:3, :3]
+    x = R[:, 0] - (R[:, 0] @ z) * z
+    if np.linalg.norm(x) < 1e-3:
+        x = np.cross(R[:, 1], z)
+    x /= np.linalg.norm(x)
+    out = T.copy()
+    out[:3, :3] = np.stack([x, np.cross(z, x), z], 1)
+    return out
+
+
 def o3d_voxel(points, voxel):
     """点 (N, 3) をボクセルで間引く．"""
     import open3d as o3d
@@ -169,6 +181,8 @@ class LivePoseNode(Node):
         self.pub_meas = self.create_publisher(PointCloud2, "/pose/measured_points", 2)    # 位置合わせに使った計測点群
         self.pub_ball_model = self.create_publisher(PointCloud2, "/pose/ball_models", 2)  # 位置合わせ後のボールのモデル（色付き）
         self.pub_ball_meas = self.create_publisher(PointCloud2, "/pose/ball_measured", 2) # ボールの位置合わせに使った計測点群（色付き）
+        self.pub_ball_model_edges = self.create_publisher(PointCloud2, "/pose/ball_model_edges", 2)  # 位置合わせ後のモデルの色境界点（水色）
+        self.pub_ball_meas_edges = self.create_publisher(PointCloud2, "/pose/ball_measured_edges", 2)  # 計測点群の色境界点（黄色）
         self.poses = []                # [(name, T)]
         self.pose_lock = threading.Lock()
         self.create_timer(0.1, self.publish_tf)   # 最新の姿勢を 10Hz で配信し続ける（RViz で古くならないように）
@@ -197,6 +211,8 @@ class LivePoseNode(Node):
             cfg = replace(cfg, use_cylinder_axis=False)
         if args.no_lingbot:             # 深度補完（LingBot-Depth）を使わず，飛び値の除去だけにする
             cfg = replace(cfg, depth_refine=False)
+        if args.lingbot_tokens > 0:     # LingBot-Depth を軽くする（トークン数を減らす．深度は粗くなる）
+            cfg = replace(cfg, lingbot_tokens=args.lingbot_tokens)
         if not args.no_cpp:             # 重い基本処理を C++ で（結果は Python 版と同じ）
             cfg = replace(cfg, use_cpp=True)
         self.recon = MaskReconstructor(cfg)
@@ -218,7 +234,19 @@ class LivePoseNode(Node):
                 raise SystemExit("--symmetric-kalman には --track-ids が必要です")
             from pose_estimation.pose_filter import PoseFilterBank
             self.ball_filter = PoseFilterBank(rot_std_deg=args.kalman_rot_std, pos_std=args.kalman_pos_std,
-                                              rot_rate_deg=args.kalman_rot_rate, pos_rate=args.kalman_pos_rate)
+                                              rot_rate_deg=args.kalman_rot_rate, pos_rate=args.kalman_pos_rate,
+                                              gate_deg=args.kalman_gate_deg)
+        self.pipe_filter = None
+        if args.pipe_kalman:
+            # T字パイプの姿勢も ID ごとにカルマンフィルタで平滑化する．幹の軸まわりの 180° は同じ形なので対称性として扱う
+            if self.id_tracker is None:
+                raise SystemExit("--pipe-kalman には --track-ids が必要です")
+            from pose_estimation.pose_filter import PoseFilterBank, half_turn_symmetry
+            S, err = half_turn_symmetry(self.model, axis_index=1)
+            self.get_logger().info(f"T字パイプの対称性：幹の軸まわりの 180°（対応点までの距離の中央値 {err*1000:.2f} mm）")
+            self.pipe_filter = PoseFilterBank(rot_std_deg=args.kalman_rot_std, pos_std=args.kalman_pos_std,
+                                              rot_rate_deg=args.kalman_rot_rate, pos_rate=args.kalman_pos_rate,
+                                              gate_deg=args.kalman_gate_deg, symmetries=[S])
         self.cur_ids = []
         # 表示の配信を別スレッドで行う（--sync-display なら従来どおり推定と同じスレッドで）
         self.display_queue = None
@@ -238,8 +266,29 @@ class LivePoseNode(Node):
         if args.symmetric_color:
             # 回転対称な物体：色付きモデル（元のコードと同じ 1 mm で間引く）と，表示・評価用の形状だけのモデル
             from pose_estimation.color_registration import ColorEdgeRegistration, load_colored_model
-            self.color_reg = ColorEdgeRegistration(facing_check=True)   # 表裏を確認する（膨らんだ側がカメラを向く候補）
-            self.sym_model = load_colored_model(args.symmetric_model, voxel=args.symmetric_model_voxel)
+            self.color_reg = ColorEdgeRegistration(facing_check=True, icp_voxel=args.symmetric_icp_voxel)   # 表裏を確認する（膨らんだ側がカメラを向く候補）
+            self.sphere_reg = None
+            if args.symmetric_method == "sphere":
+                # 球全体の色付きモデル（YCB）で，縫い目による 3 自由度の回転探索（sphere_seam_registration.py）
+                from pose_estimation.sphere_seam_registration import SphereSeamRegistration
+                self.sym_model = load_colored_model(args.symmetric_sphere_model, voxel=0.0005)
+                self.sphere_reg = SphereSeamRegistration(self.sym_model, feature=args.sphere_feature,
+                                                         model_edge_all=args.sphere_model_edge_all,
+                                                         edge_percent=args.sphere_edge_percent)
+                syms = self.sphere_reg.seam_symmetries()
+                # 同じ縫い目に見える姿勢のうち，基準の向き（モデルの軸がカメラの軸と揃う向き．set_ball_model_frame.py で
+                # 実物の置き方に合わせてある）に最も近いものを出す（軸の向きをそろえる）
+                self.sphere_reg.canonical_syms = [S[:3, :3] for S in syms]
+                self.sphere_reg.canonical_mode = args.sphere_canonical
+                self.get_logger().info(f"ボールの位置合わせ：球全体のモデルで 3 自由度の探索（模様の点：{args.sphere_feature}，"
+                                       f"モデルの模様の点 {len(self.sphere_reg.model_seam)}，縫い目の対称性 180° 回転 {len(syms)} 個）")
+                if self.ball_filter is not None:   # 同じ縫い目に見える姿勢の間の飛びを外れ値として捨てない
+                    self.ball_filter.kw["symmetries"] = syms
+                    if args.sphere_canonical == "ref":   # 基準の向きに揃え，ID ごとに同じ姿勢を保つ（--sphere-switch-deg の余裕で切り替え）
+                        self.ball_filter.kw["canonical_ref"] = self.sphere_reg.canonical_ref
+                        self.ball_filter.kw["switch_deg"] = args.sphere_switch_deg
+            else:
+                self.sym_model = load_colored_model(args.symmetric_model, voxel=args.symmetric_model_voxel)
             self.sym_model_xyz = np.asarray(o3d_voxel(self.sym_model[:, :3], self.pc.voxel_size))
             # 表示用のモデルの色：モデルの色は暗く幅が狭い（0.3〜0.7）ので，縫い目が見えるよう明るさの幅を広げる（BGR）
             c = self.sym_model[:, 3:6]
@@ -346,7 +395,9 @@ class LivePoseNode(Node):
             if self.color_reg is not None and mask_circularity(m) >= self.args.symmetric_circ:
                 # マスクの外形が円に近い → 回転対称な物体．点数の比はそのモデルに対して判定する
                 cp = mask_to_colored_points(m, frame_sym, self.pc, self.args.symmetric_voxel)
-                if self.pc.min_model_ratio <= 0 or len(cp) >= self.pc.min_model_ratio * len(self.sym_model):
+                # 点数の比は片面のモデルとだけ比べる（球全体のモデルとは見えている範囲が違うので判定しない）
+                if (self.pc.min_model_ratio <= 0 or self.sphere_reg is not None
+                        or len(cp) >= self.pc.min_model_ratio * len(self.sym_model)):
                     sym_clouds[i] = cp
                 else:
                     skipped.append(i)
@@ -392,6 +443,8 @@ class LivePoseNode(Node):
             from pose_estimation.registration_svd import RegistrationResult
             t3 = time.perf_counter()
             sym_models = {}
+            sym_edges = {}   # 計測側の色境界点（表示用）
+            n_no_seam = 0
             for i, cp in sym_clouds.items():
                 model_i = self.sym_model
                 if self.ball_masknet is not None:
@@ -401,11 +454,22 @@ class LivePoseNode(Node):
                     if len(keep) >= 0.2 * len(self.sym_model):   # 削りすぎたら（全体の 2 割未満）全体を使う
                         model_i = self.sym_model[keep]
                         sym_models[i] = keep
+                if self.sphere_reg is not None:
+                    T = self.sphere_reg(cp)
+                    sym_edges[i] = self.sphere_reg.last_seam
+                    if T is None:   # 縫い目が見えない（少ない）ときは姿勢を出さない
+                        n_no_seam += 1
+                        continue
+                    results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=self.sphere_reg.last_score,
+                                                    icp_fitness=float("nan"), icp_rmse=float("nan"), flip=[])
+                    continue
                 T = self.color_reg(model_i, cp)
                 results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=self.color_reg.last_fitness,
                                                 icp_fitness=self.color_reg.last_icp_fitness,
                                                 icp_rmse=float("nan"), flip=[])
             t_sym = time.perf_counter() - t3
+            if n_no_seam:
+                self.get_logger().info(f"#{k}: 縫い目が見えず姿勢を出さなかったボール {n_no_seam} 個")
             if self.ball_masknet is not None:
                 kept = [len(k) / len(self.sym_model) for k in sym_models.values()]
                 self.get_logger().info(f"#{k}: ボールの MaskNet：削ったモデルを使った {len(sym_models)}/{len(sym_clouds)} 個，"
@@ -434,7 +498,24 @@ class LivePoseNode(Node):
                         rejected.append(self.cur_ids[i])
             self.get_logger().info(f"#{k}: ボールのカルマンフィルタ：ID {[self.cur_ids[i] for i in sym_clouds]}"
                                    + (f"，外れ値として捨てた観測 ID {rejected}" if rejected else ""))
-        named = [(f"part_{self.cur_ids[i]}", T) for i, T in enumerate(poses) if T is not None]
+        if self.pipe_filter is not None:
+            t_now = time.monotonic()
+            rejected = []
+            for i in clouds:   # T字パイプとして位置合わせした部品
+                if poses[i] is not None:
+                    poses[i], rej = self.pipe_filter.update(self.cur_ids[i], poses[i], t_now)
+                    if rej:
+                        rejected.append(self.cur_ids[i])
+            if rejected:
+                self.get_logger().info(f"#{k}: T字パイプのカルマンフィルタ：外れ値として捨てた観測 ID {rejected}")
+        tf_poses = list(poses)
+        if self.args.sphere_force_z and sym_clouds:
+            # TF だけ，ボールの z 軸をカメラの奥（+z）にそろえる（x は推定の x 軸をカメラの奥に垂直な面に投影．
+            # 表示用のモデルは縫い目を合わせた姿勢のまま）
+            for i in sym_clouds:
+                if tf_poses[i] is not None:
+                    tf_poses[i] = force_z_axis(tf_poses[i])
+        named = [(f"part_{self.cur_ids[i]}", T) for i, T in enumerate(tf_poses) if T is not None]
         with self.pose_lock:
             self.poses = named
         self.publish_tf()
@@ -443,7 +524,8 @@ class LivePoseNode(Node):
         job = dict(frame=frame, poses=poses, masks=masks, skipped=list(skipped), oversized=list(oversized),
                    named=named, stamp=stamp, k=k, t_seg=t_seg, t_pose=t_pose, s=s, ids=list(self.cur_ids),
                    crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models,
-                   sym_clouds=sym_clouds, sym_models=sym_models if sym_clouds else {})
+                   sym_clouds=sym_clouds, sym_models=sym_models if sym_clouds else {},
+                   sym_edges=sym_edges if sym_clouds else {})
         if self.display_queue is not None:   # 表示は別スレッドで（推定の待ち時間に含めない）
             try:
                 self.display_queue.get_nowait()   # まだ表示していない古いデータは捨てる
@@ -526,6 +608,8 @@ class LivePoseNode(Node):
             self.publish_masknet(j["crops"], j["clouds"], poses, j["stamp"], ids=j["ids"])
         if self.color_reg is not None:
             self.publish_balls(j["sym_clouds"], poses, j["stamp"], j.get("sym_models") or {})
+            if self.sphere_reg is not None:
+                self.publish_ball_edges(j["sym_clouds"], j.get("sym_edges") or {}, poses, j["stamp"])
 
     def publish_balls(self, sym_clouds, poses, stamp, sym_models=None):
         """位置合わせ後のボールのモデル（推定姿勢でカメラ座標に置き，モデルの色）と，位置合わせに使った計測点群（カメラの色）．
@@ -539,6 +623,8 @@ class LivePoseNode(Node):
                 continue
             keep = (sym_models or {}).get(i)   # MaskNet で削ったときは，位置合わせに使った部分だけを表示する
             sel = slice(None) if keep is None else keep
+            if keep is None and len(self.sym_model) > 20000:   # 点の多いモデル（球全体）は表示用に間引く
+                sel = slice(None, None, int(np.ceil(len(self.sym_model) / 20000)))
             pts.append(self.sym_model[sel, :3] @ T[:3, :3].T + T[:3, 3])
             cols.append(self.sym_model_bgr[sel])
             meas.append(cp[:, :3])
@@ -546,6 +632,27 @@ class LivePoseNode(Node):
         empty = (np.zeros((0, 3)), np.zeros((0, 3), np.uint8))
         self.pub_ball_model.publish(points_msg(*((np.vstack(pts), np.vstack(cols)) if pts else empty), stamp))
         self.pub_ball_meas.publish(points_msg(*((np.vstack(meas), np.vstack(mcols)) if meas else empty), stamp))
+
+    def publish_ball_edges(self, sym_clouds, sym_edges, poses, stamp):
+        """両方の色境界点：位置合わせ後のモデルの色境界点（水色．カメラを向いた半球だけ）と，計測点群の色境界点（黄色）．
+
+        モデル側は位置合わせで使う点そのもの（sphere_reg.model_seam）．姿勢はカルマンフィルタ後の出力．
+        """
+        mod, meas = [], []
+        for i in sym_clouds:
+            e = sym_edges.get(i)
+            if e is not None and len(e):
+                meas.append(e)
+            T = poses[i]
+            if T is None:
+                continue
+            P = self.sphere_reg.model_seam @ T[:3, :3].T + T[:3, 3]
+            mod.append(P[((P - T[:3, 3]) * P).sum(1) < 0])   # 中心から外向きの向きがカメラを向く点
+        def msg(lst, bgr):
+            xyz = np.vstack(lst) if lst else np.zeros((0, 3))
+            return points_msg(xyz, np.tile(np.array(bgr, np.uint8), (len(xyz), 1)), stamp)
+        self.pub_ball_model_edges.publish(msg(mod, (255, 255, 0)))
+        self.pub_ball_meas_edges.publish(msg(meas, (0, 255, 255)))
 
     def too_big(self, m, p, s):
         """マスクが部品1個として大きすぎるか：見えている点の主軸方向の長さか実面積が，CAD の値の (1+m) 倍を超える．
@@ -677,10 +784,12 @@ def main():
                     help="深度を直近 N フレームの画素ごとの中央値にする（静止シーン用，0 で使わない）")
     ap.add_argument("--no-lingbot", action="store_true",
                     help="深度補完（LingBot-Depth）を使わない（深度の飛び値の除去だけ）")
+    ap.add_argument("--lingbot-tokens", type=int, default=0,
+                    help="LingBot-Depth に入れるトークン数（0：既定の 3600）．減らすほど速いが深度が粗くなる（2400 で約 240 ms，1200 で約 120 ms）")
     ap.add_argument("--voxel", type=float, default=0.002,
                     help="位置合わせの前に計測点群とモデルを間引くボクセルの辺長 [m]")
-    ap.add_argument("--model-voxel", type=float, default=0.0,
-                    help="MaskNet に入れるモデルだけを間引くボクセルの辺長 [m]（0 なら --voxel と同じ）")
+    ap.add_argument("--model-voxel", type=float, default=0.0027,
+                    help="MaskNet に入れる T字パイプのモデルだけを間引くボクセルの辺長 [m]（0 なら --voxel と同じ．既定は 2.7 mm）")
     ap.add_argument("--registration", choices=["visible", "masknet"], default="visible",
                     help="visible: 全周モデルの見える面だけで SVD+ICP（GPU）/ masknet: MaskNet で削ったモデルで SVD+ICP")
     ap.add_argument("--no-visible-only", action="store_true",
@@ -694,19 +803,48 @@ def main():
                          "色情報を用いた位置合わせ（color_registration.py）で推定する．それ以外は従来の位置合わせ（T字パイプ）")
     ap.add_argument("--symmetric-circ", type=float, default=CIRCULARITY_MIN,
                     help="回転対称とみなすマスクの外形の円形度の下限（円で 1）")
-    ap.add_argument("--symmetric-voxel", type=float, default=0.0005,
+    ap.add_argument("--symmetric-voxel", type=float, default=0.0003,
                     help="回転対称な物体の色付き計測点群を間引くボクセルの辺長 [m]（元のコードは 1 mm．"
                          "小さいほど縫い目の色が周りと混ざらない．約 16 cm の距離で 1 画素は約 0.37 mm）")
-    ap.add_argument("--symmetric-model-voxel", type=float, default=0.0005,
+    ap.add_argument("--symmetric-icp-voxel", type=float, default=0.002,
+                    help="回転対称な物体の最後の ICP だけ，この辺長 [m] で間引いた粗い点群で行う（0 で間引かない）")
+    ap.add_argument("--symmetric-model-voxel", type=float, default=0.0003,
                     help="回転対称な物体のモデル点群を読み込むときに間引くボクセルの辺長 [m]（元のコードは 1 mm）")
+    ap.add_argument("--symmetric-method", choices=["cap", "sphere"], default="sphere",
+                    help="回転対称な物体の位置合わせ．cap: 片面のモデル（--symmetric-model）で軸まわりの回転を探す / "
+                         "sphere: 球全体のモデル（--symmetric-sphere-model）で縫い目による 3 自由度の回転を探す")
+    ap.add_argument("--sphere-feature", choices=["red", "edge"], default="edge",
+                    help="球全体の位置合わせで模様として使う点．red: 赤い点（野球ボールの縫い目専用）/ "
+                         "edge: 色の境界（模様の色によらない）")
+    ap.add_argument("--sphere-model-edge-all", action="store_true",
+                    help="--sphere-feature edge のとき，モデル側は割合を決めず，色の境界と判定できる点を全部使う（大津のしきい値）")
+    ap.add_argument("--sphere-edge-percent", type=float, default=0.10,
+                    help="--sphere-feature edge のとき，計測点群から色の境界として取る点の割合（色の変化の大きい上位）．"
+                         "--sphere-model-edge-all がなければモデル側も同じ割合")
+    ap.add_argument("--sphere-canonical", choices=["ref", "z_away"], default="ref",
+                    help="同じ縫い目に見える姿勢のうちどれを出すか．ref: 基準の向きに最も近いもの / "
+                         "z_away: モデルの z 軸（RViz の青）がカメラの奥を最も向くもの")
+    ap.add_argument("--sphere-switch-deg", type=float, default=20.0,
+                    help="--sphere-canonical ref と --symmetric-kalman のとき，ID ごとに保っている対称な姿勢を，"
+                         "別の対称な姿勢の方が基準の向きにこれ [deg] 以上近くなったときだけ切り替える")
+    ap.add_argument("--sphere-force-z", action="store_true",
+                    help="ボールの TF の z 軸（RViz の青）を常にカメラの奥にそろえる（x 軸は縫い目から推定した向きを投影．"
+                         "ボールの傾きは TF に出なくなる．表示のモデルは縫い目を合わせた姿勢のまま）")
+    ap.add_argument("--symmetric-sphere-model",
+                    default=str(Path(__file__).resolve().parent.parent / "pose_estimation" / "models" / "ball_ycb_ref.pcd"),
+                    help="球全体の色付きモデル（既定は YCB の 055_baseball から make_ycb_ball_model.py で作り，set_ball_model_frame.py で軸の向きを実物の置き方に合わせたもの）")
     ap.add_argument("--symmetric-masknet", action="store_true",
                     help="試験：回転対称な物体のモデルも MaskNet で計測点群に合わせて削ってから色で位置合わせする")
     ap.add_argument("--symmetric-kalman", action="store_true",
                     help="試験：回転対称な物体の姿勢を，ID ごとにカルマンフィルタで平滑化する（--track-ids が必要）")
+    ap.add_argument("--pipe-kalman", action="store_true",
+                    help="T字パイプの姿勢も ID ごとにカルマンフィルタで平滑化する（幹の軸まわりの 180° を対称性として扱う．--track-ids が必要）")
     ap.add_argument("--kalman-rot-std", type=float, default=6.0, help="カルマンフィルタ：1 フレームの回転の揺れ [deg]")
     ap.add_argument("--kalman-pos-std", type=float, default=0.002, help="カルマンフィルタ：1 フレームの位置の揺れ [m]")
     ap.add_argument("--kalman-rot-rate", type=float, default=5.0,
                     help="カルマンフィルタ：1 秒あたりに許す回転の変化 [deg/√s]（小さいほど強く平滑化，動きへの追従は遅い）")
+    ap.add_argument("--kalman-gate-deg", type=float, default=30.0,
+                    help="カルマンフィルタ：今の推定から回転がこれ [deg] 以上ずれた観測は外れ値として捨てる（3 回続いたら合わせ直す）")
     ap.add_argument("--kalman-pos-rate", type=float, default=0.005, help="カルマンフィルタ：1 秒あたりに許す位置の変化 [m/√s]")
     ap.add_argument("--symmetric-depth", choices=["raw", "refined"], default="refined",
                     help="回転対称な物体の点群を作る深度．raw: センサの生の深度 / refined: セグメンテーションで使った深度"

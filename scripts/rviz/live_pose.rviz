@@ -147,6 +147,28 @@ Visualization Manager:
       Size (Pixels): 2
       Color Transformer: RGB8
       Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: ボールのモデルの色境界（水色）
+      Enabled: true
+      Topic:
+        Value: /pose/ball_model_edges
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 4
+      Color Transformer: RGB8
+      Decay Time: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: ボールの計測の色境界（黄色）
+      Enabled: true
+      Topic:
+        Value: /pose/ball_measured_edges
+        Depth: 2
+        Reliability Policy: Best Effort
+      Style: Points
+      Size (Pixels): 4
+      Color Transformer: RGB8
+      Decay Time: 0
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 5

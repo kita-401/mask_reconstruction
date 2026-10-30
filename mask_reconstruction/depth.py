@@ -44,7 +44,8 @@ def refine_depth(model, sample, cfg: Config, device):
 
     with torch.no_grad():
         out = model.infer(img_t, depth_in=depth_t, apply_mask=True,
-                          intrinsics=intr_t, enable_depth_mask=False)
+                          intrinsics=intr_t, enable_depth_mask=False,
+                          num_tokens=cfg.lingbot_tokens if cfg.lingbot_tokens > 0 else None)
     return (out["depth"].squeeze().cpu().numpy() * 1000.0).astype(np.uint16)
 
 
