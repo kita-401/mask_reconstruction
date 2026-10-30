@@ -378,7 +378,7 @@ python scripts/run_pose_estimation.py --masks gt baseline proposed
 `pose_estimation/color_registration.py` に移植し，実機の推定ノードに組み込んだ．
 
 1. セグメント → マスクごとに外形の円形度 4πA/P²（円で 1）を求める
-2. 円形度 < `--symmetric-circ`（既定 0.85）：従来の位置合わせ（T字パイプ，`--registration` の設定どおり）
+2. 円形度 < `--symmetric-circ`（既定 0.78．当初は 0.85 だったが，置き場所によってボールが 0.80〜0.87 になるため下げた）：従来の位置合わせ（T字パイプ，`--registration` の設定どおり）
 3. 円形度 ≥ `--symmetric-circ`：回転対称な物体とみなし，色付き点群（1 mm で間引き）を色情報で位置合わせ
    （野球ボール．当初は color_Registration の `ball_PCD2.pcd`，現在は D405 で撮影した `pose_estimation/models/ball_d405_v2.pcd`）．
    点の少ない部品の判定（`--min-model-ratio`）はボールのモデルの点数に対して行う
@@ -421,6 +421,34 @@ bash scripts/run_live_pose.sh --registration masknet --track-ids --symmetric-col
   いずれも `ColorEdgeRegistration` の引数として残している（既定は元のコードと同じ）
 - 残っている問題：静止したボールでも姿勢が 4〜12° ばらつく．モデルはボールの片面だけなので，違う面がカメラを向いたボールには合わない
 - RViz：`/pose/ball_models`（位置合わせ後のボールのモデル，モデルの色），`/pose/ball_measured`（ボールの計測点群，カメラの色）
+
+#### ボールの姿勢のカルマンフィルタ（`--symmetric-kalman`，2026-10-30）
+
+静止したボールでも推定姿勢がフレームごとに揺れる（30〜50° の飛びもある）ため，ID 追跡（`--track-ids`）の ID ごとに
+姿勢を平滑化する（`pose_estimation/pose_filter.py`）．状態は姿勢（位置・回転），動きのモデルは「ほぼ動かない」．
+回転は SO(3) のまま持ち誤差を回転ベクトルで表す誤差状態カルマンフィルタ（クォータニオンの成分の足し引きは
+符号の反転や 180° 付近で破綻するため．color_Registration の `color_estimate_test_kalman.py` は 13 次元の UKF）．
+前の推定から回転 30° 以上か位置 20 mm 以上ずれた観測は外れ値として捨て，3 回続けて外れたら観測に合わせ直す．
+T字パイプには使わない．
+
+```bash
+bash scripts/run_live_pose.sh --registration masknet --track-ids --symmetric-color --symmetric-kalman
+```
+
+- 実機（静止したボール 3 個，30 秒ずつ）：連続フレーム間の回転の差の中央値 7.6〜11.6° → 2.8〜6.6°，最大 31〜52° → 14〜15°，
+  位置の揺れ 2.5〜2.8 → 2.0〜2.4 mm．揺れを抑えるもので，平均の姿勢の誤差は変わらない
+- 調整：`--kalman-rot-std`（1 フレームの回転の揺れ，既定 6°），`--kalman-rot-rate`（1 秒あたりに許す回転の変化，既定 5°/√s，
+  小さいほど強く平滑化し動きへの追従は遅い），`--kalman-pos-std`・`--kalman-pos-rate`
+- ゆっくり動かすと遅れてついてくる．すばやく大きく動かすと 3 フレームで切り替わる
+
+#### その他（2026-10-30）
+
+- ボールの判定の円形度の下限を 0.85 → 0.78（置き場所によってボールが 0.80〜0.87 になり，30 フレーム中 22 回パイプと判定されたため）
+- 試験：ボールのモデルも MaskNet で削ってから位置合わせ（`--symmetric-masknet`，既定オフ）．ボール 4 個×6 フレームで
+  姿勢のばらつき 7.1 → 10.9°，縫い目の距離 1.98 → 2.25 px と悪化（モデルも計測もお椀形で削る手がかりがなく，
+  中央値で 95% を残し，ときどき 6 割まで削って縫い目が欠ける）
+- モデルの撮影：ボールが複数あるとき画像の中央に最も近いものを使う（`capture_ball_model.py --pick-center`）．
+  その後 v3〜v7 を撮影したが（撮影距離 23〜26 cm，点数 8,800〜13,400），既定は `ball_d405_v2.pcd` のまま
 
 ### 評価指標（真値姿勢がないため）
 

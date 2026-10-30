@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--frames", type=int, default=15, help="平均・中央値を取るフレーム数")
     ap.add_argument("--voxel", type=float, default=0.0005, help="点群の間隔 [m]")
     ap.add_argument("--shell", type=float, default=0.003, help="球面からこれ以上離れた点を除く [m]")
+    ap.add_argument("--pick-center", action="store_true",
+                    help="ボールらしいマスク（円形度 0.85 以上）が複数あるとき，画像の中央に最も近いものを使う（既定は止める）")
     ap.add_argument("--method", default="hier_improved_v2_fast", choices=list(METHODS))
     args = ap.parse_args()
     out = Path(args.out)
@@ -92,8 +94,19 @@ def main():
     print(f"マスク {len(masks)} 個，円形度の最大 {circ[i]:.2f}（2番目 {sorted(circ)[-2] if len(circ) > 1 else 0:.2f}）")
     if circ[i] < 0.85:
         sys.exit("円形度 0.85 以上のマスクがありません．ボールが視野に入っているか確認してください．")
-    if sum(c >= 0.85 for c in circ) > 1:
-        sys.exit("ボールらしいマスクが複数あります．ボールは1個だけ置いてください．")
+    balls = [j for j, c in enumerate(circ) if c >= 0.85]
+    if len(balls) > 1:
+        if not args.pick_center:
+            sys.exit("ボールらしいマスクが複数あります．ボールは1個だけ置くか，--pick-center を付けてください．")
+        h, w = masks[0].shape
+
+        def dist_center(j):
+            ys, xs = np.nonzero(masks[j])
+            return np.hypot(xs.mean() - w / 2, ys.mean() - h / 2)
+        i = min(balls, key=dist_center)
+        ys, xs = np.nonzero(masks[i])
+        print(f"ボールらしいマスク {len(balls)} 個のうち，画像の中央に最も近いもの（中心 {xs.mean():.0f}, {ys.mean():.0f} px，"
+              f"円形度 {circ[i]:.2f}）を使います")
 
     K = np.array([[s.fx, 0, s.cx], [0, s.fy, s.cy], [0, 0, 1]])
     cp = mask_to_colored_points(masks[i], Frame(rgb=s.rgb, depth=recon.last_depth, K=K), PoseConfig(), args.voxel)
