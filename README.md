@@ -59,6 +59,142 @@ recon = MaskReconstructor(Config(bound_depth_thresh=0.010))  # パラメータ�
 masks = recon.reconstruct(load_sample(9))
 ```
 
+## 実機での使い方（D405 → セグメンテーション → 姿勢推定 → TF）
+
+### 全体の流れ
+
+```mermaid
+flowchart TD
+    CAM["camera_node.py（別プロセス）<br/>D405 のカラー・深度（カラーに位置合わせ）・内部パラメータを配信"]
+    CAM --> SEG
+    subgraph SEG["セグメンテーション（MaskReconstructor，hier_improved_v2_fast）"]
+        S1["FastSAM で過分割（断片マスク）"] --> S2["LingBot-Depth で深度補完（--lingbot-tokens）"]
+        S2 --> S3["断片フィルタ・平面除去"] --> S4["3D モデルを参照した断片の統合 → 部品ごとのマスク"]
+    end
+    SEG --> ID["マスクの ID 追跡（--track-ids，IoU＋ハンガリアン法）"]
+    ID --> CIRC{"マスクの円形度 ≥ 0.78 ?"}
+    CIRC -- "いいえ（T字パイプ）" --> P1["マスク → 点群（生の深度，2 mm で間引き）<br/>大きすぎる・点の少ないマスクは除く"]
+    P1 --> P2["MaskNet で全周モデルを見えている部分に削る"]
+    P2 --> P3["SVD（主軸）で初期姿勢 4 通り → fitness 最大を採用<br/>（ICP は既定でなし．--masknet-icp で有効）"]
+    P3 --> PK["カルマンフィルタ（--pipe-kalman，幹の軸まわり 180° を同一視）"]
+    CIRC -- "はい（野球ボール）" --> B1["色付き点群（LingBot 補完後の深度，0.3 mm で間引き）"]
+    B1 --> B2["既知の半径で球を当てはめ → 中心＝位置"]
+    B2 --> B3["色の境界（上位 10%）を球面上の方向にし，球全体の YCB モデルと<br/>3 自由度の回転を探索（粗い探索 4 万通り → 細かく）"]
+    B3 --> B4["同じ縫い目に見える 4 姿勢のうちモデルの基準の向きに最も近いもの"]
+    B4 --> BK["カルマンフィルタ（--symmetric-kalman，ID ごとに同じ姿勢を保つ）"]
+    PK --> TF["TF：camera_color_optical_frame → part_N（N は ID，10 Hz）"]
+    BK --> TF
+    PK --> VIZ["RViz 表示用トピック（/pose/...）"]
+    BK --> VIZ
+```
+
+1 フレームの時間の目安（T字パイプ 4 個）：セグメンテーション約 360 ms（うち LingBot-Depth 約 250 ms），
+T字パイプの姿勢推定は 1 個あたり MaskNet 約 8 ms＋SVD 約 2 ms，ボールは 1 個あたり約 110〜140 ms．
+最初のフレームだけモデルの初期化で約 2.6 秒かかる．
+
+### 実行手順
+
+1. D405 を USB 3 で接続する．conda の `vlm_rag` 環境と ROS 2 Humble を使う（`run_live_pose.sh` が両方を読み込む）
+2. 部品をトレイに置き，次を実行する（カメラノード・RViz2・推定ノードが起動する）
+
+   ```bash
+   cd ~/kitamura2_ws/src/mask_reconstruction
+   bash scripts/run_live_pose.sh --registration masknet --track-ids --symmetric-color \
+       --symmetric-kalman --pipe-kalman --lingbot-tokens 2400
+   ```
+
+   | オプション | 内容 |
+   |---|---|
+   | `--registration masknet` | T字パイプを MaskNet＋SVD で位置合わせ（既定の `visible` は全周モデルの見える面で SVD＋ICP を GPU でまとめて行う） |
+   | `--track-ids` | フレームが変わっても同じ部品に同じ ID を付ける（TF の名前 `part_<ID>` が安定する．カルマンフィルタに必要） |
+   | `--symmetric-color` | 円形度 ≥ 0.78 のマスクを野球ボールとして色で位置合わせ（なければ全部 T字パイプとして扱う） |
+   | `--symmetric-kalman` / `--pipe-kalman` | ボール / T字パイプの姿勢を ID ごとに平滑化 |
+   | `--lingbot-tokens 2400` | 深度補完を軽くする（既定 3600．約 140 ms 速くなる．深度はやや粗くなる） |
+
+   その他：`--no-lingbot`（深度補完なし），`--masknet-icp`（T字パイプで ICP もかける），
+   `--save`（推定ごとに `results/live/` に保存．ディスクを使うので必要なときだけ）．全オプションは `python scripts/live_pose_node.py --help`
+3. RViz2（`scripts/rviz/live_pose.rviz`）で TF・モデル・推定画像を確認する．ログに 1 フレームごとの処理時間の内訳が出る
+4. 終了は Ctrl+C（カメラノード・RViz2 も閉じる）
+
+通信は `ROS_DOMAIN_ID=11`・`ROS_LOCALHOST_ONLY=1`（この PC 内だけ）．同じネットワークの他の ROS 2 システム（ドメイン 0 の xArm など）と
+混ざらないようにするため．ロボット側と TF をやり取りするときは，起動時に
+`ROS_DOMAIN_ID_LIVE=<ロボットと同じ番号> ROS_LOCALHOST_ONLY_LIVE=0 bash scripts/run_live_pose.sh ...` とする．
+
+### 配信するもの
+
+| トピック | 型 | 内容 |
+|---|---|---|
+| `/tf` | `tf2_msgs/TFMessage` | 推定姿勢（下記） |
+| `/camera/color/image_raw`, `/camera/aligned_depth/image_raw`, `/camera/color/camera_info` | Image / CameraInfo | カメラノードの出力（深度は mm，16UC1） |
+| `/pose/overlay` | Image | 推定したモデルを画像に重ねたもの |
+| `/pose/masks` | Image | セグメンテーション結果（ID 付き） |
+| `/pose/models` | MarkerArray | 推定姿勢に置いた T字パイプのモデル |
+| `/pose/segmented_points` | PointCloud2 | マスクごとに色分けした点群 |
+| `/pose/measured_points`, `/pose/masknet_models` | PointCloud2 | T字パイプの位置合わせに使った計測点群 / MaskNet で削ったモデル |
+| `/pose/ball_models`, `/pose/ball_measured` | PointCloud2 | 位置合わせ後のボールのモデル / ボールの計測点群 |
+| `/pose/ball_model_edges`, `/pose/ball_measured_edges` | PointCloud2 | ボールのモデル（水色）/ 計測（黄色）の色境界点．重なっていれば回転も合っている |
+
+### 推定姿勢の TF
+
+- **親フレーム**：`camera_color_optical_frame`（D405 のカラーカメラの光学座標系．x：画像の右，y：画像の下，z：カメラの奥，単位 m）
+- **子フレーム**：`part_<ID>`（`--track-ids` のとき追跡 ID，なければそのフレームのマスクの番号）．T字パイプもボールも同じ名前の付け方
+- **変換**：モデル座標 → カメラ座標（`T_model_to_cam`）．`part_<ID>` の原点・軸はモデル点群の原点・軸そのもの
+- **配信**：最新の推定を 10 Hz で配信し続ける（時刻印は配信した時刻で，撮影した時刻ではない．推定は約 0.4〜0.5 秒遅れる）．
+  見えなくなった部品は次の推定から配信されなくなる
+- **モデルの座標系**
+  - T字パイプ（`pose_estimation/models/t_pipe_full.pcd`，単位 m）：原点は主管の中心軸上で枝管と交わる点，
+    x＝主管の軸（±43 mm），y＝枝管の向き（枝の先が +y，43 mm），z＝T字の面に垂直．
+    枝管の軸（y）まわりに 180° 回した姿勢は形が同じなので，x・z の向きはどちらにもなりうる（カルマンフィルタは同一視して扱う）
+  - 野球ボール（`pose_estimation/models/ball_ycb_ref.pcd`，YCB の 055_baseball から作成，半径 36.6 mm）：原点は球の中心．
+    軸は `scripts/set_ball_model_frame.py` で実物を置いたときにカメラの軸と揃うように決めたもの．
+    縫い目は 180° 回すと重なる軸を 3 本持つので，同じ見え方の姿勢が 4 つある．基準の向きに最も近いものを選び，
+    `--symmetric-kalman` のとき ID ごとに同じ姿勢を保つ（別の姿勢の方が 20° 以上近くなったら切り替える，`--sphere-switch-deg`）．
+    位置（球の中心）は縫い目に関係なく決まる
+
+確認：
+
+```bash
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=11 ROS_LOCALHOST_ONLY=1
+ros2 run tf2_ros tf2_echo camera_color_optical_frame part_0
+```
+
+### ロボット座標系との合わせ方
+
+推定ノードはカメラ座標系での姿勢しか出さない．ロボットで使うには，ロボットのベース（例：`link_base`）からカメラの光学座標系
+`camera_color_optical_frame` への変換（カメラの外部パラメータ）を求めて TF に加える．
+そうすれば tf2 が `link_base → camera_color_optical_frame → part_<ID>` をつないで，ロボット座標系での部品の姿勢が得られる．
+
+1. **カメラの外部パラメータを求める**（カメラを固定する eye-to-hand の場合）
+   - ハンドアイキャリブレーション：ロボットの手先に ArUco／ChArUco ボードを付けて 10〜20 姿勢で撮影し，手先の姿勢（ロボットから）と
+     ボードの姿勢（画像から）の組から `link_base → camera_color_optical_frame` を解く（OpenCV の `cv2.calibrateRobotWorldHandEye`，
+     ROS 2 の easy_handeye2 など）
+   - 簡易な方法：トレイ上の 4 点以上をロボットの手先で触ってロボット座標を記録し，同じ点のカメラ座標（深度画像から）と
+     最小二乗（SVD による剛体変換の推定）で合わせる．精度は触る位置の精度に依存する
+   - カメラを手先に付ける（eye-in-hand）場合は，手先 → カメラの変換を求め，`link_eef → camera_color_optical_frame` として加える
+2. **TF に加える**（求めた並進 x y z [m] と回転のクォータニオン qx qy qz qw）
+
+   ```bash
+   ros2 run tf2_ros static_transform_publisher \
+       --x 0.50 --y 0.00 --z 0.60 --qx 0.0 --qy 1.0 --qz 0.0 --qw 0.0 \
+       --frame-id link_base --child-frame-id camera_color_optical_frame
+   ```
+
+   （数値は例．カメラ本体のフレーム `camera_link` ではなく，推定が使う光学座標系 `camera_color_optical_frame` に直接つなぐ）
+3. **ロボット座標系で部品の姿勢を取得する**
+
+   ```bash
+   ros2 run tf2_ros tf2_echo link_base part_0
+   ```
+
+   プログラムからは `tf2_ros.Buffer.lookup_transform("link_base", "part_0", rclpy.time.Time())`．
+4. **注意**
+   - 推定ノードとロボットのノードを同じ `ROS_DOMAIN_ID` にし，`ROS_LOCALHOST_ONLY` を外す（上記の `ROS_DOMAIN_ID_LIVE` など）
+   - TF の時刻印は配信時刻なので，部品が動いている間の値は 0.5 秒程度古い．掴む前にロボットを止め，数フレーム待ってから読む
+   - `part_<ID>` はモデルの原点（T字パイプは主管と枝管の交点，ボールは中心）なので，把持位置・アプローチ方向は
+     モデル座標でのオフセットとして別に決める．T字パイプは枝管の軸まわり 180° が区別できないので，把持は x・z の向きに依存しないようにする
+   - ID はマスクの追跡で付けるので，部品が大きく動いたり隠れたりすると ID が変わることがある
+
 ## 結果（配置 10 種の平均）
 
 | Method | mIoU [%] | Precision [%] | Recall [%] | Over-seg | Under-seg |

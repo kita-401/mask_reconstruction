@@ -54,6 +54,8 @@ def color_edge_points(points, colors, smooth_rad=0.003, edge_rad=0.0015, percent
     """色の境界の点の番号：色を半径 smooth_rad で平滑化し，半径 edge_rad の近傍との色の差の平均が大きい上位 percent．
     percent=None なら割合を決めず，色の差が大津のしきい値を超える点を全部返す．
     （color_registration.py の色エッジと同じ考え方．点が多くても使えるよう KD 木で近傍を探す）"""
+    if len(points) < 2:   # 点がなければ境界もない（KD 木の近傍探索が空の配列で失敗するため）
+        return np.zeros(0, dtype=int)
     tree = cKDTree(points)
     k = min(k, len(points))
 
@@ -168,6 +170,9 @@ class SphereSeamRegistration:
             out = measured[:, :3] - c
             cosv = -(out * measured[:, :3]).sum(1) / (np.linalg.norm(out, axis=1) * np.linalg.norm(measured[:, :3], axis=1) + 1e-12)
             front = measured[cosv > np.cos(self.max_view)]
+            if len(front) < 20:   # 縁を除くと点が残らない（画像の端・誤判定のマスクなど）→ 縫い目が見えないのと同じ扱い
+                self.last_n_seam, self.last_seam = 0, np.zeros((0, 3))
+                return None
             if self.edge_gpu and str(self.device).startswith("cuda"):
                 seam = front[color_edge_points_gpu(front[:, :3], front[:, 3:6], self.device, percent=self.edge_percent), :3]
             else:
