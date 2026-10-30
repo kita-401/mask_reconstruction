@@ -211,6 +211,14 @@ class LivePoseNode(Node):
         self.reg = SVDICPRegistration(self.pc) if args.cpu_registration else GPUBatchRegistration(self.pc)
         self.model = load_model(self.pc)
         self.id_tracker = MaskIdTracker() if args.track_ids else None
+        self.ball_filter = None
+        if args.symmetric_kalman:
+            # 試験：ボールの姿勢を ID ごとにカルマンフィルタで平滑化する（pose_filter.py）．ID 追跡が必要
+            if self.id_tracker is None:
+                raise SystemExit("--symmetric-kalman には --track-ids が必要です")
+            from pose_estimation.pose_filter import PoseFilterBank
+            self.ball_filter = PoseFilterBank(rot_std_deg=args.kalman_rot_std, pos_std=args.kalman_pos_std,
+                                              rot_rate_deg=args.kalman_rot_rate, pos_rate=args.kalman_pos_rate)
         self.cur_ids = []
         # 表示の配信を別スレッドで行う（--sync-display なら従来どおり推定と同じスレッドで）
         self.display_queue = None
@@ -237,6 +245,15 @@ class LivePoseNode(Node):
             c = self.sym_model[:, 3:6]
             c = (c - c.min(0)) / np.maximum(c.max(0) - c.min(0), 1e-6)
             self.sym_model_bgr = (c[:, ::-1] * 255).astype(np.uint8)
+            self.ball_masknet = None
+            if args.symmetric_masknet:
+                # 試験：ボールのモデルも MaskNet で計測点群に合わせて削ってから色で位置合わせする．
+                # MaskNet には形だけを 2 mm 間隔で入れ，残ったモデル点の近く（2 mm 以内）の色付きモデル点を使う
+                from scipy.spatial import cKDTree
+                from masksvd_exp.masksvd import MaskSVD, MaskSVDConfig
+                self.ball_masknet = MaskSVD(replace(MaskSVDConfig(model_path=args.symmetric_model), normalize_scale=True,
+                                                    center_inputs=True, model_voxel=0.002))
+                self.sym_model_tree = cKDTree(self.sym_model[:, :3])
             self.get_logger().info(f"回転対称な物体（マスクの円形度 ≥ {args.symmetric_circ}）は色で位置合わせ："
                                    f"{Path(args.symmetric_model).name}（{len(self.sym_model)} 点）")
         from mask_reconstruction.cad_prior import load_cad_prior
@@ -374,12 +391,25 @@ class LivePoseNode(Node):
         if sym_clouds:
             from pose_estimation.registration_svd import RegistrationResult
             t3 = time.perf_counter()
+            sym_models = {}
             for i, cp in sym_clouds.items():
-                T = self.color_reg(self.sym_model, cp)
+                model_i = self.sym_model
+                if self.ball_masknet is not None:
+                    crop = self.ball_masknet.crop_model(o3d_voxel(cp[:, :3], 0.002))
+                    near = self.sym_model_tree.query_ball_point(crop, r=0.002)
+                    keep = np.unique(np.concatenate([np.asarray(n, int) for n in near])) if len(crop) else np.zeros(0, int)
+                    if len(keep) >= 0.2 * len(self.sym_model):   # 削りすぎたら（全体の 2 割未満）全体を使う
+                        model_i = self.sym_model[keep]
+                        sym_models[i] = keep
+                T = self.color_reg(model_i, cp)
                 results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=self.color_reg.last_fitness,
                                                 icp_fitness=self.color_reg.last_icp_fitness,
                                                 icp_rmse=float("nan"), flip=[])
             t_sym = time.perf_counter() - t3
+            if self.ball_masknet is not None:
+                kept = [len(k) / len(self.sym_model) for k in sym_models.values()]
+                self.get_logger().info(f"#{k}: ボールの MaskNet：削ったモデルを使った {len(sym_models)}/{len(sym_clouds)} 個，"
+                                       f"残した割合 {np.round(kept, 2).tolist()}")
         part_models = {i: self.sym_model_xyz for i in sym_clouds}   # 部品ごとのモデル（なければ T字パイプ）
         t_reg = time.perf_counter() - t2
         for i in range(len(masks)):
@@ -394,6 +424,16 @@ class LivePoseNode(Node):
         t_pose = time.perf_counter() - t1
         # マスクの ID：--track-ids なら，フレームが変わっても同じパイプに同じ ID を付ける．なければマスクの番号
         self.cur_ids = self.id_tracker.assign(masks) if self.id_tracker is not None else list(range(len(masks)))
+        if self.ball_filter is not None and sym_clouds:
+            t_now = time.monotonic()
+            rejected = []
+            for i in sym_clouds:
+                if poses[i] is not None:
+                    poses[i], rej = self.ball_filter.update(self.cur_ids[i], poses[i], t_now)
+                    if rej:
+                        rejected.append(self.cur_ids[i])
+            self.get_logger().info(f"#{k}: ボールのカルマンフィルタ：ID {[self.cur_ids[i] for i in sym_clouds]}"
+                                   + (f"，外れ値として捨てた観測 ID {rejected}" if rejected else ""))
         named = [(f"part_{self.cur_ids[i]}", T) for i, T in enumerate(poses) if T is not None]
         with self.pose_lock:
             self.poses = named
@@ -403,7 +443,7 @@ class LivePoseNode(Node):
         job = dict(frame=frame, poses=poses, masks=masks, skipped=list(skipped), oversized=list(oversized),
                    named=named, stamp=stamp, k=k, t_seg=t_seg, t_pose=t_pose, s=s, ids=list(self.cur_ids),
                    crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models,
-                   sym_clouds=sym_clouds)
+                   sym_clouds=sym_clouds, sym_models=sym_models if sym_clouds else {})
         if self.display_queue is not None:   # 表示は別スレッドで（推定の待ち時間に含めない）
             try:
                 self.display_queue.get_nowait()   # まだ表示していない古いデータは捨てる
@@ -485,9 +525,9 @@ class LivePoseNode(Node):
         if j["crops"] is not None:
             self.publish_masknet(j["crops"], j["clouds"], poses, j["stamp"], ids=j["ids"])
         if self.color_reg is not None:
-            self.publish_balls(j["sym_clouds"], poses, j["stamp"])
+            self.publish_balls(j["sym_clouds"], poses, j["stamp"], j.get("sym_models") or {})
 
-    def publish_balls(self, sym_clouds, poses, stamp):
+    def publish_balls(self, sym_clouds, poses, stamp, sym_models=None):
         """位置合わせ後のボールのモデル（推定姿勢でカメラ座標に置き，モデルの色）と，位置合わせに使った計測点群（カメラの色）．
 
         2つの縫い目が重なっていれば，回転も合っている．
@@ -497,8 +537,10 @@ class LivePoseNode(Node):
             T = poses[i]
             if T is None:
                 continue
-            pts.append(self.sym_model[:, :3] @ T[:3, :3].T + T[:3, 3])
-            cols.append(self.sym_model_bgr)
+            keep = (sym_models or {}).get(i)   # MaskNet で削ったときは，位置合わせに使った部分だけを表示する
+            sel = slice(None) if keep is None else keep
+            pts.append(self.sym_model[sel, :3] @ T[:3, :3].T + T[:3, 3])
+            cols.append(self.sym_model_bgr[sel])
             meas.append(cp[:, :3])
             mcols.append((cp[:, 3:6][:, ::-1] * 255).astype(np.uint8))
         empty = (np.zeros((0, 3)), np.zeros((0, 3), np.uint8))
@@ -657,6 +699,15 @@ def main():
                          "小さいほど縫い目の色が周りと混ざらない．約 16 cm の距離で 1 画素は約 0.37 mm）")
     ap.add_argument("--symmetric-model-voxel", type=float, default=0.0005,
                     help="回転対称な物体のモデル点群を読み込むときに間引くボクセルの辺長 [m]（元のコードは 1 mm）")
+    ap.add_argument("--symmetric-masknet", action="store_true",
+                    help="試験：回転対称な物体のモデルも MaskNet で計測点群に合わせて削ってから色で位置合わせする")
+    ap.add_argument("--symmetric-kalman", action="store_true",
+                    help="試験：回転対称な物体の姿勢を，ID ごとにカルマンフィルタで平滑化する（--track-ids が必要）")
+    ap.add_argument("--kalman-rot-std", type=float, default=6.0, help="カルマンフィルタ：1 フレームの回転の揺れ [deg]")
+    ap.add_argument("--kalman-pos-std", type=float, default=0.002, help="カルマンフィルタ：1 フレームの位置の揺れ [m]")
+    ap.add_argument("--kalman-rot-rate", type=float, default=5.0,
+                    help="カルマンフィルタ：1 秒あたりに許す回転の変化 [deg/√s]（小さいほど強く平滑化，動きへの追従は遅い）")
+    ap.add_argument("--kalman-pos-rate", type=float, default=0.005, help="カルマンフィルタ：1 秒あたりに許す位置の変化 [m/√s]")
     ap.add_argument("--symmetric-depth", choices=["raw", "refined"], default="refined",
                     help="回転対称な物体の点群を作る深度．raw: センサの生の深度 / refined: セグメンテーションで使った深度"
                          "（既定では LingBot-Depth で補完したもの．--no-lingbot なら飛び値除去のみ）")
