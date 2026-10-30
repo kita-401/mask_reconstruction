@@ -196,24 +196,38 @@ def distance_matrix(masks, pts, valid_idx, v_u, v_v, cfg: Config):
     return D
 
 
-def principal_extent(p, percentile):
-    """点群の主成分軸方向の寸法（大きい順，[percentile, 100-percentile] の幅）．"""
+def principal_extent(p, percentile, use_cpp=False):
+    """点群の主成分軸方向の寸法（大きい順，[percentile, 100-percentile] の幅）．
+
+    use_cpp=True なら同じ値を C++ で計算する（主成分を共分散の固有ベクトルで求めるので，丸めの分だけ違うことがある）．
+    """
+    if use_cpp:
+        from . import cpp_kernels as ck
+        return ck.principal_extent(p, percentile)
     c = p - p.mean(axis=0)
     _, _, Vt = np.linalg.svd(c, full_matrices=False)
     proj = c @ Vt.T
     return np.percentile(proj, 100 - percentile, axis=0) - np.percentile(proj, percentile, axis=0)
 
 
+_CAD_EXTENT_CACHE = {}
+
+
 def cad_extent(cfg: Config):
-    """CADモデル点群の主軸方向寸法 [m]（大きい順）．"""
+    """CADモデル点群の主軸方向寸法 [m]（大きい順）．同じファイル（更新時刻も同じ）なら読み込みと計算を1回だけ行う．"""
+    import os
     import open3d as o3d
-    return principal_extent(np.asarray(o3d.io.read_point_cloud(cfg.cad_model).points), 0.0)
+    key = (cfg.cad_model, os.path.getmtime(cfg.cad_model))
+    if key not in _CAD_EXTENT_CACHE:
+        _CAD_EXTENT_CACHE[key] = principal_extent(np.asarray(o3d.io.read_point_cloud(cfg.cad_model).points), 0.0)
+    return _CAD_EXTENT_CACHE[key].copy()
 
 
 def remerge_within_cad(clusters, D, frag_pts, limit, cfg: Config):
     """分割で生じた切れ端を，最も近い断片対（single linkage）の距離が閾値以下で，
     統合後もCAD寸法に収まるクラスタ同士で貪欲に再統合する．統合後の寸法が小さい組を優先．"""
     clusters = [list(c) for c in clusters]
+    ext_cache = {}   # 同じ断片の並び（統合後のクラスタ）の寸法は繰り返しのたびに計算し直さない（結果は同じ）
     while True:
         cands = []
         for a in range(len(clusters)):
@@ -221,8 +235,11 @@ def remerge_within_cad(clusters, D, frag_pts, limit, cfg: Config):
                 d = D[np.ix_(clusters[a], clusters[b])].min()
                 if d > cfg.cluster_thresh:
                     continue
-                ext = principal_extent(np.vstack([frag_pts[i] for i in clusters[a] + clusters[b]]),
-                                       cfg.extent_percentile)
+                key = tuple(clusters[a] + clusters[b])
+                if key not in ext_cache:
+                    ext_cache[key] = principal_extent(np.vstack([frag_pts[i] for i in key]), cfg.extent_percentile,
+                                                      use_cpp=cfg.use_cpp)
+                ext = ext_cache[key]
                 if np.all(ext[:2] <= limit):
                     cands.append((d, ext[0], a, b))
         if not cands:
@@ -247,7 +264,8 @@ def cad_constrained_cut(Z, D, frag_pts, cfg: Config):
         return [node] if node < n else leaves(children[node][0]) + leaves(children[node][1])
 
     def fits(node):
-        ext = principal_extent(np.vstack([frag_pts[i] for i in leaves(node)]), cfg.extent_percentile)
+        ext = principal_extent(np.vstack([frag_pts[i] for i in leaves(node)]), cfg.extent_percentile,
+                               use_cpp=cfg.use_cpp)
         return np.all(ext[:2] <= limit)
 
     clusters = []
@@ -275,6 +293,18 @@ def merge_fragments(masks, pts, valid_idx, v_u, v_v, cfg: Config, cam=None):
     """
     if len(masks) == 0:
         return []
+    if cfg.split_fragments:
+        # 統合前の断片の切り分け（split_fragments.py）．2つの部品にまたがった断片を分けてから統合する
+        from dataclasses import replace
+        from .split_fragments import split_fragments
+        masks = split_fragments(masks, pts, valid_idx, v_u, v_v, cfg)
+        return merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, split_fragments=False), cam)
+    if cfg.final_merge:
+        # 統合後の仕上げ（final_merge.py）．分かれたマスクをもう一度まとめる
+        from dataclasses import replace
+        from .final_merge import final_merge_masks
+        merged = merge_fragments(masks, pts, valid_idx, v_u, v_v, replace(cfg, final_merge=False), cam)
+        return final_merge_masks(merged, pts, valid_idx, v_u, v_v, cfg, cam)
     if cfg.post_close:
         # 2026-10-16 の改善5（postprocess.py）
         from dataclasses import replace

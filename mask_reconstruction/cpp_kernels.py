@@ -32,8 +32,13 @@ def lib():
         L.mr_mask_counts.argtypes = [_u8, _int, _int, _int, _u8, _int, _i64]
         L.mr_pair_features.argtypes = [_u8, _int, _int, _int, _int, _f64, ctypes.c_void_p,
                                        _u8, _f64, _f64, _i64, _i64]
+        L.mr_principal_extent.argtypes = [_f64, ctypes.c_int64, ctypes.c_double, _f64]
+        L.mr_fragment_pca.argtypes = [_f64, _i64, _int, _f64, _f64]
+        L.mr_fragment_pca.restype = None
+        L.mr_pair_features_ab.argtypes = [_u8, _int, _u8, _int, _int, _int, _int, _f64, ctypes.c_void_p,
+                                          _u8, _f64, _f64]
         for f in (L.mr_point_image, L.mr_organized_normals, L.mr_gather_indices, L.mr_mask_counts,
-                  L.mr_pair_features):
+                  L.mr_pair_features, L.mr_principal_extent, L.mr_pair_features_ab):
             f.restype = None
         _lib = L
     return _lib
@@ -104,3 +109,35 @@ def pair_features(stack, ksize, Z, N=None):
     lib().mr_pair_features(stack, n, H, W, ksize, np.ascontiguousarray(Z, dtype=np.float64), Np,
                            adjacent, gap, nangle, overlap, area)
     return adjacent.view(bool), gap, nangle, overlap, area
+
+
+def principal_extent(p, percentile):
+    """merging.principal_extent と同じ（主成分の方向ごとの [p, 100-p] パーセンタイル幅，分散の大きい順）．"""
+    out = np.empty(3)
+    lib().mr_principal_extent(np.ascontiguousarray(p, dtype=np.float64), len(p), float(percentile), out)
+    return out
+
+
+def pair_features_ab(stack_a, stack_b, ksize, Z, N=None):
+    """集合 A の各マスクと集合 B の各マスクの組（nA×nB）の (adjacent, gap, nangle)．"""
+    na, H, W = stack_a.shape
+    nb = stack_b.shape[0]
+    adjacent = np.zeros((na, nb), np.uint8)
+    gap = np.full((na, nb), np.nan)
+    nangle = np.full((na, nb), np.nan)
+    Np = None
+    if N is not None:
+        N = np.ascontiguousarray(N, dtype=np.float64)
+        Np = N.ctypes.data_as(ctypes.c_void_p)
+    lib().mr_pair_features_ab(stack_a, na, stack_b, nb, H, W, ksize, np.ascontiguousarray(Z, dtype=np.float64), Np,
+                              adjacent, gap, nangle)
+    return adjacent.view(bool), gap, nangle
+
+
+def fragment_pca(frag_points):
+    """断片ごとの点群の重心と第1主軸（merging.fragment_pca と同じ．主軸の符号は不定）．"""
+    n = len(frag_points)
+    offsets = np.concatenate([[0], np.cumsum([len(f) for f in frag_points])]).astype(np.int64)
+    centers, axes = np.empty((n, 3)), np.empty((n, 3))
+    lib().mr_fragment_pca(np.ascontiguousarray(np.concatenate(frag_points), dtype=np.float64), offsets, n, centers, axes)
+    return list(centers), list(axes)

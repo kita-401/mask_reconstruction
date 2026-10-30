@@ -10,6 +10,8 @@
 #include <limits>
 #include <vector>
 
+#include <Eigen/Dense>
+
 namespace {
 
 struct Box {
@@ -276,6 +278,132 @@ void mr_pair_features(const uint8_t* masks, int n, int H, int W, int ksize, cons
                 for (int t = 0; t < 3; ++t) dot += (mk3[t] / nk) * (ml3[t] / nl);
                 dot = std::min(1.0, std::max(-1.0, dot));
                 nangle[kl] = nangle[lk] = std::acos(dot) * 180.0 / M_PI;
+            }
+        }
+    }
+}
+
+// numpy.percentile（既定の linear）と同じ値：idx = q/100·(n−1) の前後2点を補間する．v は並べ替えてよい作業領域
+static double percentile_linear(std::vector<double>& v, double q) {
+    const size_t n = v.size();
+    const double idx = q / 100.0 * (double)(n - 1);
+    const size_t lo = (size_t)std::floor(idx);
+    const size_t hi = std::min(lo + 1, n - 1);
+    const double t = idx - (double)lo;
+    std::nth_element(v.begin(), v.begin() + lo, v.end());
+    const double a = v[lo];
+    double b = a;
+    if (hi != lo) b = *std::min_element(v.begin() + lo + 1, v.end());
+    const double d = b - a;
+    return t >= 0.5 ? b - d * (1.0 - t) : a + d * t;     // numpy の _lerp と同じ
+}
+
+// merging.principal_extent と同じ：主成分の方向（分散の大きい順）ごとの [q, 100−q] パーセンタイル幅．
+// 主成分は numpy の SVD の代わりに共分散の固有ベクトルで求める（軸は同じ．符号は幅に影響しない）
+void mr_principal_extent(const double* p, int64_t n, double q, double* out) {
+    double mean[3] = {0, 0, 0};
+    for (int64_t i = 0; i < n; ++i) for (int t = 0; t < 3; ++t) mean[t] += p[i * 3 + t];
+    for (int t = 0; t < 3; ++t) mean[t] /= (double)n;
+    Eigen::Matrix3d C = Eigen::Matrix3d::Zero();
+    for (int64_t i = 0; i < n; ++i) {
+        Eigen::Vector3d c(p[i * 3] - mean[0], p[i * 3 + 1] - mean[1], p[i * 3 + 2] - mean[2]);
+        C += c * c.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(C);   // 固有値は昇順
+    std::vector<double> proj(n);
+    for (int a = 0; a < 3; ++a) {
+        const Eigen::Vector3d v = es.eigenvectors().col(2 - a);   // 分散の大きい順
+        for (int64_t i = 0; i < n; ++i)
+            proj[i] = (p[i * 3] - mean[0]) * v(0) + (p[i * 3 + 1] - mean[1]) * v(1) + (p[i * 3 + 2] - mean[2]) * v(2);
+        std::vector<double> w(proj);
+        const double hi = percentile_linear(w, 100.0 - q);
+        const double lo = percentile_linear(w, q);
+        out[a] = hi - lo;
+    }
+}
+
+// 断片ごとの点群の重心と第1主軸（merging.fragment_pca と同じ．主軸は共分散の最大固有ベクトル）．
+// 点は全断片を連結した (sum, 3)，offsets は n+1 個
+void mr_fragment_pca(const double* p, const int64_t* offsets, int n, double* centers, double* axes) {
+    for (int k = 0; k < n; ++k) {
+        const int64_t s = offsets[k], e = offsets[k + 1];
+        double m[3] = {0, 0, 0};
+        for (int64_t i = s; i < e; ++i) for (int t = 0; t < 3; ++t) m[t] += p[i * 3 + t];
+        for (int t = 0; t < 3; ++t) m[t] /= (double)(e - s);
+        Eigen::Matrix3d C = Eigen::Matrix3d::Zero();
+        for (int64_t i = s; i < e; ++i) {
+            Eigen::Vector3d c(p[i * 3] - m[0], p[i * 3 + 1] - m[1], p[i * 3 + 2] - m[2]);
+            C += c * c.transpose();
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(C);
+        const Eigen::Vector3d v = es.eigenvectors().col(2);
+        for (int t = 0; t < 3; ++t) { centers[k * 3 + t] = m[t]; axes[k * 3 + t] = v(t); }
+    }
+}
+
+// mr_pair_features と同じ特徴を，集合 A の各マスクと集合 B の各マスクの組（nA×nB）だけ計算する
+void mr_pair_features_ab(const uint8_t* A, int nA, const uint8_t* B, int nB, int H, int W, int ksize,
+                         const double* Z, const double* N, uint8_t* adjacent, double* gap, double* nangle) {
+    const int64_t HW = (int64_t)H * W;
+    const int r = ksize / 2;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::vector<Box> ba(nA), bb(nB);
+    std::vector<Dilated> da(nA), db(nB);
+    for (int k = 0; k < nA; ++k) { ba[k] = bbox_of(A + k * HW, H, W); da[k] = dilate(A + k * HW, ba[k], H, W, r); }
+    for (int l = 0; l < nB; ++l) { bb[l] = bbox_of(B + l * HW, H, W); db[l] = dilate(B + l * HW, bb[l], H, W, r); }
+    std::vector<double> zk, zl;
+    for (int k = 0; k < nA; ++k) {
+        const uint8_t* mk = A + k * HW;
+        for (int l = 0; l < nB; ++l) {
+            const uint8_t* ml = B + l * HW;
+            const int64_t kl = (int64_t)k * nB + l;
+            gap[kl] = nan; nangle[kl] = nan;
+            bool adj = false;
+            const Box bx = intersect(da[k].box, bb[l]);
+            for (int y = bx.y0; y < bx.y1 && !adj; ++y)
+                for (int x = bx.x0; x < bx.x1; ++x)
+                    if (ml[(int64_t)y * W + x] && da[k].at(y, x)) { adj = true; break; }
+            adjacent[kl] = adj ? 1 : 0;
+            if (!adj) continue;
+            zk.clear(); zl.clear();
+            double sk[3] = {0, 0, 0}, sl[3] = {0, 0, 0};
+            int64_t ck = 0, cl = 0;
+            const Box bk = intersect(ba[k], db[l].box);
+            for (int y = bk.y0; y < bk.y1; ++y)
+                for (int x = bk.x0; x < bk.x1; ++x) {
+                    const int64_t i = (int64_t)y * W + x;
+                    if (!mk[i] || !db[l].at(y, x)) continue;
+                    if (Z[i] > 0) zk.push_back(Z[i]);
+                    if (N) {
+                        const double* nv = N + i * 3;
+                        if (std::sqrt(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]) > 0) {
+                            sk[0] += nv[0]; sk[1] += nv[1]; sk[2] += nv[2]; ++ck;
+                        }
+                    }
+                }
+            const Box bl2 = intersect(bb[l], da[k].box);
+            for (int y = bl2.y0; y < bl2.y1; ++y)
+                for (int x = bl2.x0; x < bl2.x1; ++x) {
+                    const int64_t i = (int64_t)y * W + x;
+                    if (!ml[i] || !da[k].at(y, x)) continue;
+                    if (Z[i] > 0) zl.push_back(Z[i]);
+                    if (N) {
+                        const double* nv = N + i * 3;
+                        if (std::sqrt(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]) > 0) {
+                            sl[0] += nv[0]; sl[1] += nv[1]; sl[2] += nv[2]; ++cl;
+                        }
+                    }
+                }
+            if (!zk.empty() && !zl.empty()) gap[kl] = std::fabs(median(zk) - median(zl));
+            if (N && ck >= 5 && cl >= 5) {
+                double mk3[3], ml3[3];
+                for (int t = 0; t < 3; ++t) { mk3[t] = sk[t] / ck; ml3[t] = sl[t] / cl; }
+                const double nk = std::sqrt(mk3[0] * mk3[0] + mk3[1] * mk3[1] + mk3[2] * mk3[2]);
+                const double nl = std::sqrt(ml3[0] * ml3[0] + ml3[1] * ml3[1] + ml3[2] * ml3[2]);
+                double dot = 0;
+                for (int t = 0; t < 3; ++t) dot += (mk3[t] / nk) * (ml3[t] / nl);
+                dot = std::min(1.0, std::max(-1.0, dot));
+                nangle[kl] = std::acos(dot) * 180.0 / M_PI;
             }
         }
     }

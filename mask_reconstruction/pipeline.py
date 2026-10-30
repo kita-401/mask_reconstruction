@@ -25,7 +25,8 @@ class MaskReconstructor:
     def __init__(self, cfg: Config = Config(), device=None):
         self.cfg = cfg
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.lingbot = load_lingbot(cfg, self.device)
+        # LingBot-Depth を使わない設定（depth_refine=False）なら，モデルを読み込まない（GPU メモリと起動時間の節約）
+        self.lingbot = load_lingbot(cfg, self.device) if cfg.depth_refine else None
         self.fastsam = FastSAM(cfg.fastsam_weights)
 
     def fragments(self, sample):
@@ -46,9 +47,14 @@ class MaskReconstructor:
         sync()
         times["FastSAM"], t = time.perf_counter() - t, time.perf_counter()
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)
+        self.last_depth = depth_mm   # 統合に使った深度 [mm]（LingBot-Depth の補完後など）．姿勢推定側で使えるように残す
         sync()
         times["depth"], t = time.perf_counter() - t, time.perf_counter()
-        pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
+        if self.cfg.use_gpu_ops:   # 同じ点群を GPU で計算する（gpu_ops.py）
+            from .gpu_ops import depth_to_points as depth_to_points_gpu
+            pts, valid_idx, v_u, v_v = depth_to_points_gpu(depth_mm, sample, self.cfg)
+        else:
+            pts, valid_idx, v_u, v_v = depth_to_points(depth_mm, sample, self.cfg)
         times["points"], t = time.perf_counter() - t, time.perf_counter()
         kept = filter_fragments(fragments, sample.rgb, v_u, v_v, valid_idx, self.cfg, pts=pts)
         times["filter"], t = time.perf_counter() - t, time.perf_counter()

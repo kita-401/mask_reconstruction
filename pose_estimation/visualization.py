@@ -17,8 +17,11 @@ def project(points, K):
     return np.stack([u, v], axis=1), z
 
 
-def draw_poses(frame, model_pts, poses, masks=None, axis_len=0.03):
-    """poses: list of (4,4) or None．マスクの輪郭・投影モデル点・座標軸を描く．"""
+def draw_poses(frame, model_pts, poses, masks=None, axis_len=0.03, models=None):
+    """poses: list of (4,4) or None．マスクの輪郭・投影モデル点・座標軸を描く．
+
+    models: 部品ごとのモデル点群の dict {番号: (N, 3)}．含まれない部品は model_pts を使う．
+    """
     img = (frame.rgb * 0.55).astype(np.uint8)
     n = len(poses)
     for i, T in enumerate(poses):
@@ -29,7 +32,8 @@ def draw_poses(frame, model_pts, poses, masks=None, axis_len=0.03):
             cv2.drawContours(img, cnts, -1, col, 1)
         if T is None:
             continue
-        uv, z = project(transform(model_pts, T), frame.K)
+        pts = models.get(i, model_pts) if models else model_pts
+        uv, z = project(transform(pts, T), frame.K)
         ok = (z > 0) & (uv[:, 0] >= 0) & (uv[:, 0] < img.shape[1]) & (uv[:, 1] >= 0) & (uv[:, 1] < img.shape[0])
         for u, v in uv[ok].astype(int):
             cv2.circle(img, (u, v), 1, col, -1)

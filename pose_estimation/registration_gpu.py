@@ -38,9 +38,13 @@ def _nearest(x, tmpl, tmpl_sq, hidden=None):
 
 
 def _per_part_sum(v, bid, B):
-    """点ごとの値 v (P, ...) を部品ごとに合計する → (B, ...)．"""
-    out = torch.zeros((B, *v.shape[1:]), dtype=v.dtype, device=v.device)
-    return out.index_add_(0, bid, v)
+    """点ごとの値 v (P, ...) を部品ごとに合計する → (B, ...)．
+
+    部品の割り当て表（B×P の 0/1）との行列積で求める．index_add（並列の足し込み）は足す順番が毎回変わり，
+    結果が実行ごとにわずかに揺れて，初期候補の選び方まで入れ替わることがあったため．
+    """
+    oh = (bid[None, :] == torch.arange(B, device=bid.device)[:, None]).to(v.dtype)
+    return (oh @ v.reshape(v.shape[0], -1)).reshape(B, *v.shape[1:])
 
 
 def _kabsch(x, y, w, bid, B):
@@ -65,6 +69,7 @@ class GPUBatchRegistration:
         self.cfg = cfg
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.flips = torch.tensor(FLIP_PATTERNS, dtype=torch.float32, device=self.device)
+        self.check_every = 5   # 収束の確認（同期）を何回に1回行うか
         self.prune = False   # True: 収束した部品の点を計算から外す（同期が増え，この規模ではかえって遅い）
 
     def __call__(self, model_pts, measured_pts) -> RegistrationResult:
@@ -171,8 +176,9 @@ class GPUBatchRegistration:
 
         def evaluate(sel):
             """sel の点について，現在の姿勢での対応点と部品ごとの fitness・RMSE．"""
-            b = bid[sel]
-            x = torch.einsum("pij,pj->pi", R_tot[b], Xc[sel]) + t_tot[b]
+            # sel が None なら全点（真偽値での取り出しは GPU との同期を起こすので，点を外さないときは使わない）
+            b, Xs = (bid, Xc) if sel is None else (bid[sel], Xc[sel])
+            x = torch.einsum("pij,pj->pi", R_tot[b], Xs) + t_tot[b]
             allowed = ((~visible(R_tot, t_tot)).float() * _HIDDEN, b) if visible is not None else None
             d, idx = _nearest(x, tmpl_c, tmpl_sq, allowed)
             inl = (d < cfg.icp_threshold).float()
@@ -182,10 +188,10 @@ class GPUBatchRegistration:
             return x, idx, inl, f, r
 
         active = torch.ones(B, dtype=torch.bool, device=dev)
-        sel = torch.ones(len(Xc), dtype=torch.bool, device=dev)
+        sel = None
         x, idx, inl, fit, rmse = evaluate(sel)
-        for _ in range(cfg.icp_max_iteration):
-            b = bid[sel]
+        for it in range(cfg.icp_max_iteration):
+            b = bid if sel is None else bid[sel]
             dR, dt = _kabsch(x, tmpl_c[idx], inl, b, B)
             R_tot = torch.where(active[:, None, None], dR @ R_tot, R_tot)
             t_tot = torch.where(active[:, None], (dR @ t_tot[..., None]).squeeze(-1) + dt, t_tot)
@@ -194,7 +200,9 @@ class GPUBatchRegistration:
             fit = torch.where(active, fit2, fit)
             rmse = torch.where(active, rmse2, rmse)
             new_active = active & ~conv
-            if not bool(new_active.any()):
+            # 全部品が収束したかの確認（CPU と GPU の同期）は check_every 回に1回だけ行う．
+            # 収束した部品はそれ以上更新しないので，確認が遅れても結果は変わらない
+            if (it + 1) % self.check_every == 0 and not bool(new_active.any()):
                 break
             if self.prune and not torch.equal(new_active, active):   # 収束した部品の点を外す
                 keep = new_active[b]

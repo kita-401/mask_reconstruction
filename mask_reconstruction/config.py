@@ -185,6 +185,21 @@ class Config:
     # 断片の点の取り出し，断片の組ごとの隣接・深度差・法線角・重なり，深度画像上の法線，断片フィルタの集計
     use_cpp: bool = False
 
+    # --- 統合後の仕上げ：1つの部品が2つ以上のマスクに分かれたものをまとめる（final_merge.py） ---
+    final_merge: bool = False
+    final_merge_margin: float = 0.2     # まとめた後の大きさが CAD の (1+この値) 倍以内なら許す
+
+    # --- 統合前の断片の切り分け：2つの部品にまたがった断片を，深度・法線の途切れで分ける（split_fragments.py） ---
+    split_fragments: bool = False
+    # 既定値は LingBot-Depth なし（生の深度）の10配置で 4mm/20°/300px，8mm/20°/300px，8mm/30°/1000px，
+    # 12mm/30°/1000px，8mm/45°/1000px を比べて選んだ（厳しいと生の深度の雑音で部品の中まで切れる）
+    split_depth_thresh: float = 0.008   # [m] 隣り合う画素の深度差がこれ以上なら途切れ
+    split_normal_thresh: float = 30.0   # [deg] 隣り合う画素の法線の角度差がこれ以上なら途切れ
+    split_min_area: int = 1000          # [px] これ未満の切れ端は捨てる
+
+    # --- 高速化：点群化を GPU で行う（gpu_ops.py）．結果は CPU 版と同じ ---
+    use_gpu_ops: bool = False
+
     # --- 平面除去による背景断片の除去（黒いトレイ以外の背景用．断片フィルタで使う） ---
     # 点群で最も大きな平面（机・トレイの面）を RANSAC で求め，点の plane_max_ratio 超が平面上にある断片を捨てる
     use_plane_removal: bool = False
