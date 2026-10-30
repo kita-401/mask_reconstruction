@@ -18,6 +18,9 @@ class Config:
     fastsam_weights: str = str(WEIGHTS_DIR / "FastSAM-s.pt")
     yolo_weights: str = str(WEIGHTS_DIR / "yolo26n-seg.pt")
     lingbot_model: str = "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
+    # LingBot-Depth に入れるトークン数（0：モデルの既定＝最大の 3600）．減らすほど速いが深度が粗くなる
+    # （データセット 3 枚で 3600：371 ms，2400：239 ms，1800：178 ms，1200：121 ms）
+    lingbot_tokens: int = 0
 
     # --- 入力画像 ---
     # LingBot-Depth (ViT, patch 14) に合わせて縦横を14の倍数に切り下げる
