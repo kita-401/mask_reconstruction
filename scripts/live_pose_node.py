@@ -261,7 +261,8 @@ class LivePoseNode(Node):
             from masksvd_exp.masksvd import MaskSVD, MaskSVDConfig
             self.masknet = MaskSVD(replace(MaskSVDConfig(model_path=model_path), normalize_scale=True,
                                            center_inputs=True, flip_mode="search", icp_threshold=0.01,
-                                           model_voxel=args.model_voxel if args.model_voxel > 0 else self.pc.voxel_size))
+                                           model_voxel=args.model_voxel if args.model_voxel > 0 else self.pc.voxel_size,
+                                           prune_iter=args.masknet_prune_iter, no_icp=not args.masknet_icp))
         self.color_reg = None
         if args.symmetric_color:
             # 回転対称な物体：色付きモデル（元のコードと同じ 1 mm で間引く）と，表示・評価用の形状だけのモデル
@@ -431,9 +432,16 @@ class LivePoseNode(Node):
                                        f"MaskNet の入力で計測点を間引いた部品 {n_thinned}/{len(clouds)} 個")
             for i, p in clouds.items():
                 crops[i] = self.masknet.crop_model(p)          # MaskNet で削ったモデル（モデル座標）
+            t_crop = time.perf_counter() - t2
+            t_c = time.perf_counter()
+            for i, p in clouds.items():
                 T = self.masknet.register(p, template=crops[i])  # register(p) と同じ（削る処理を分けただけ）
                 results[i] = RegistrationResult(T_model_to_cam=T, svd_fitness=float("nan"),
                                                 icp_fitness=float("nan"), icp_rmse=float("nan"), flip=[])
+            t_c = time.perf_counter() - t_c
+            if clouds:
+                self.get_logger().info(f"#{k}: T字パイプ {len(clouds)} 個：MaskNet {t_crop*1000:.0f} ms，"
+                                       + (f"SVD+ICP {t_c*1000:.0f} ms" if self.args.masknet_icp else f"SVD（ICP なし） {t_c*1000:.0f} ms"))
         elif isinstance(self.reg, GPUBatchRegistration):
             results = dict(zip(clouds, self.reg.batch(self.model, list(clouds.values()))))
         else:
@@ -810,6 +818,12 @@ def main():
                     help="回転対称な物体の最後の ICP だけ，この辺長 [m] で間引いた粗い点群で行う（0 で間引かない）")
     ap.add_argument("--symmetric-model-voxel", type=float, default=0.0003,
                     help="回転対称な物体のモデル点群を読み込むときに間引くボクセルの辺長 [m]（元のコードは 1 mm）")
+    ap.add_argument("--masknet-prune-iter", type=int, default=0,
+                    help="--masknet-icp のとき，符号 4 通りの初期姿勢をまずこの回数だけ ICP し，fitness が最も高い 1 つだけを"
+                         "最後まで ICP する（0 なら 4 通りとも最後まで）")
+    ap.add_argument("--masknet-icp", action="store_true",
+                    help="--registration masknet で SVD の初期姿勢から ICP をかける（既定は ICP をせず，SVD の初期姿勢のうち"
+                         "符号 4 通りで fitness が最大のものをそのまま出す．ICP ありより速く，実機の目視で十分だった）")
     ap.add_argument("--symmetric-method", choices=["cap", "sphere"], default="sphere",
                     help="回転対称な物体の位置合わせ．cap: 片面のモデル（--symmetric-model）で軸まわりの回転を探す / "
                          "sphere: 球全体のモデル（--symmetric-sphere-model）で縫い目による 3 自由度の回転を探す")

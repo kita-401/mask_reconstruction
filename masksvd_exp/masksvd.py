@@ -32,6 +32,9 @@ class MaskSVDConfig:
     keep_relative: float = 0.5            # refine：確率が最大値のこの割合以上のモデル点を残す
     input_sizes: str = "density"          # "density": 元実装の密度ベース / "trained": 学習時と同じ モデル1024点・計測256点
     model_voxel: float = 0.0              # >0: モデルをこの辺長 [m] でボクセル化（計測点群と同じ密度にする）．0: 密度から決める
+    prune_iter: int = 0                   # >0: 符号探索の各候補をまずこの回数だけ ICP し，fitness の上位 prune_keep 個だけ続ける
+    prune_keep: int = 1
+    no_icp: bool = False                  # True: ICP をせず，SVD の初期姿勢のうち fitness（icp_threshold 以内の割合）が最も高いものを返す
 
 
 def load_masknet(cfg: MaskSVDConfig, device):
@@ -146,13 +149,27 @@ class MaskSVD:
                 if np.linalg.det(R) < 0:
                     R = Sv @ np.diag(f) @ np.diag([-1, 1, 1]) @ Tv.T
                 cands.append(R.T)
-        best = None
+        p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        inits = []
         for R in cands:                         # R: 計測 → モデル
             T0 = np.eye(4)
             T0[:3, :3] = R
-            res = o3d.pipelines.registration.registration_icp(
-                src, tgt, cfg.icp_threshold, T0,
-                o3d.pipelines.registration.TransformationEstimationPointToPoint(), criteria)
+            inits.append(T0)
+        if cfg.no_icp:
+            fits = [o3d.pipelines.registration.evaluate_registration(src, tgt, cfg.icp_threshold, T0).fitness for T0 in inits]
+            Tb = inits[int(np.argmax(fits))]
+            T = np.eye(4)
+            T[:3, :3], T[:3, 3] = Tb[:3, :3], Tb[:3, 3] + tm - Tb[:3, :3] @ sm   # 計測 → モデル
+            return np.linalg.inv(T)
+        if cfg.prune_iter > 0 and len(inits) > cfg.prune_keep:
+            # 各候補を少しだけ ICP して，fitness の高い候補だけを最後まで続ける（ICP の回数を減らす）
+            short = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=cfg.prune_iter)
+            pre = [o3d.pipelines.registration.registration_icp(src, tgt, cfg.icp_threshold, T0, p2p, short) for T0 in inits]
+            order = sorted(range(len(pre)), key=lambda i: -pre[i].fitness)[:cfg.prune_keep]
+            inits = [pre[i].transformation for i in order]
+        best = None
+        for T0 in inits:
+            res = o3d.pipelines.registration.registration_icp(src, tgt, cfg.icp_threshold, T0, p2p, criteria)
             if best is None or res.fitness > best.fitness:
                 best = res
         Rf = best.transformation[:3, :3]
