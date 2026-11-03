@@ -21,7 +21,7 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Header
 
 CAM_FRAME = "camera_color_optical_frame"
-W, H, FPS = 848, 480, 10       # USB 2 接続でも使える設定（USB 3 なら 30fps も可）
+W, H, FPS = 848, 480, 30       # USB 3 接続の設定．USB 2 で始められないときは 15 → 10fps で始め直す
 
 
 def image_msg(img, stamp, frame_id=CAM_FRAME):
@@ -74,11 +74,27 @@ class CameraNode(Node):
         self.pub_info = self.create_publisher(CameraInfo, "/camera/color/camera_info", 2)
         self.pub_cloud = self.create_publisher(PointCloud2, "/camera/depth/points", 2)
         self.pipe = rs.pipeline()
-        cfg = rs.config()
-        cfg.enable_stream(rs.stream.color, W, H, rs.format.bgr8, FPS)
-        cfg.enable_stream(rs.stream.depth, W, H, rs.format.z16, FPS)
-        prof = self.pipe.start(cfg)
+        # 深度の値を mm（16UC1）として配信するので，深度の単位を 1 mm にする．D405 の工場出荷時の単位は 0.1 mm で，
+        # 挿し直すとそれに戻ることがある（そのままだと距離が 10 倍に読まれ，深度補完が NaN を出す）
+        for dev in rs.context().query_devices():
+            ds = dev.first_depth_sensor()
+            if ds.supports(rs.option.depth_units):
+                ds.set_option(rs.option.depth_units, 0.001)
+        # 使えるフレームレートは接続で変わる（USB 3：5/15/30/60/90fps，USB 2：10fps などに限られる）ので，始められるまで順に試す
+        for fps in (FPS, 15, 10):
+            cfg = rs.config()
+            cfg.enable_stream(rs.stream.color, W, H, rs.format.bgr8, fps)
+            cfg.enable_stream(rs.stream.depth, W, H, rs.format.z16, fps)
+            try:
+                prof = self.pipe.start(cfg)
+                break
+            except RuntimeError:
+                if fps == 10:
+                    raise
         self.align = rs.align(rs.stream.color)
+        scale = prof.get_device().first_depth_sensor().get_depth_scale()
+        if abs(scale - 0.001) > 1e-6:
+            raise RuntimeError(f"深度の単位が 1 mm になりません（{scale} m）")
         i = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
         self.intr = dict(w=i.width, h=i.height, fx=i.fx, fy=i.fy, cx=i.ppx, cy=i.ppy)
         self.info = CameraInfo(width=i.width, height=i.height, distortion_model="plumb_bob",
@@ -86,7 +102,7 @@ class CameraNode(Node):
                                p=[i.fx, 0.0, i.ppx, 0.0, 0.0, i.fy, i.ppy, 0.0, 0.0, 0.0, 1.0, 0.0])
         for _ in range(30):            # 自動露出が落ち着くまで
             self.pipe.wait_for_frames()
-        self.get_logger().info(f"カメラ: {self.intr}")
+        self.get_logger().info(f"カメラ: {self.intr}，{fps} fps")
         self.last_cloud = 0.0
 
     def spin_once(self):

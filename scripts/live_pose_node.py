@@ -176,6 +176,7 @@ class LivePoseNode(Node):
         self.pub_overlay = self.create_publisher(Image, "/pose/overlay", 2)
         self.pub_models = self.create_publisher(MarkerArray, "/pose/models", 2)
         self.pub_masks = self.create_publisher(Image, "/pose/masks", 2)                 # セグメンテーション画像
+        self.pub_fastsam = self.create_publisher(Image, "/pose/fastsam", 2)             # FastSAM だけの断片（統合の前）
         self.pub_seg_cloud = self.create_publisher(PointCloud2, "/pose/segmented_points", 2)  # マスクごとに色分けした点群
         self.pub_crop = self.create_publisher(PointCloud2, "/pose/masknet_models", 2)     # MaskNet で削ったモデル
         self.pub_meas = self.create_publisher(PointCloud2, "/pose/measured_points", 2)    # 位置合わせに使った計測点群
@@ -285,9 +286,10 @@ class LivePoseNode(Node):
                                        f"モデルの模様の点 {len(self.sphere_reg.model_seam)}，縫い目の対称性 180° 回転 {len(syms)} 個）")
                 if self.ball_filter is not None:   # 同じ縫い目に見える姿勢の間の飛びを外れ値として捨てない
                     self.ball_filter.kw["symmetries"] = syms
-                    if args.sphere_canonical == "ref":   # 基準の向きに揃え，ID ごとに同じ姿勢を保つ（--sphere-switch-deg の余裕で切り替え）
-                        self.ball_filter.kw["canonical_ref"] = self.sphere_reg.canonical_ref
-                        self.ball_filter.kw["switch_deg"] = args.sphere_switch_deg
+                    # 基準の向き（ref）か青軸が奥（z_away）に揃え，ID ごとに同じ姿勢を保つ（--sphere-switch-deg の余裕で切り替え）
+                    self.ball_filter.kw["canonical_ref"] = self.sphere_reg.canonical_ref
+                    self.ball_filter.kw["canonical_mode"] = args.sphere_canonical
+                    self.ball_filter.kw["switch_deg"] = args.sphere_switch_deg
             else:
                 self.sym_model = load_colored_model(args.symmetric_model, voxel=args.symmetric_model_voxel)
             self.sym_model_xyz = np.asarray(o3d_voxel(self.sym_model[:, :3], self.pc.voxel_size))
@@ -533,7 +535,8 @@ class LivePoseNode(Node):
                    named=named, stamp=stamp, k=k, t_seg=t_seg, t_pose=t_pose, s=s, ids=list(self.cur_ids),
                    crops=crops if self.masknet is not None else None, clouds=clouds, part_models=part_models,
                    sym_clouds=sym_clouds, sym_models=sym_models if sym_clouds else {},
-                   sym_edges=sym_edges if sym_clouds else {})
+                   sym_edges=sym_edges if sym_clouds else {},
+                   fragments=list(getattr(self.recon, "last_fragments", None) or []))
         if self.display_queue is not None:   # 表示は別スレッドで（推定の待ち時間に含めない）
             try:
                 self.display_queue.get_nowait()   # まだ表示していない古いデータは捨てる
@@ -609,6 +612,7 @@ class LivePoseNode(Node):
                     (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         self.pub_overlay.publish(image_msg(overlay, j["stamp"]))
         self.publish_segmentation(j["s"], masks, skipped, j["stamp"], oversized, ids=j["ids"])
+        self.publish_fastsam(j["s"], j.get("fragments") or [], j["stamp"])
         ids = j["ids"]
         vis = {f"part_{ids[i]}": pts[::3] for i, pts in (j.get("part_models") or {}).items()}
         self.publish_models(j["named"], len(poses), j["stamp"], models=vis)
@@ -675,6 +679,27 @@ class LivePoseNode(Node):
         if area > lim * self.cad.A:
             return True
         return principal_extent(p, 2.0)[0] > lim * self.cad.L[0]
+
+    def publish_fastsam(self, s, fragments, stamp):
+        """FastSAM だけでセグメントした断片（断片フィルタ・統合の前）を，断片ごとに別の色で塗った画像．
+
+        面積の大きい断片から塗り，小さい断片を上にする．断片の境界は白線．
+        """
+        order = sorted(range(len(fragments)), key=lambda i: -int(fragments[i].sum()))
+        label = np.zeros((*s.shape, 3), np.uint8)
+        covered = np.zeros(s.shape, bool)
+        rng = np.random.default_rng(0)
+        colors = rng.integers(40, 256, (max(len(fragments), 1), 3), dtype=np.uint8)   # 断片の番号ごとに決まった色
+        for i in order:
+            label[fragments[i]] = colors[i]
+            covered |= fragments[i]
+        a = 0.6 * covered[..., None]
+        img = (s.rgb * (1 - a) + label * a).astype(np.uint8)
+        for i in order:
+            cnts, _ = cv2.findContours(fragments[i].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(img, cnts, -1, (255, 255, 255), 1)
+        cv2.putText(img, f"FastSAM fragments {len(fragments)}", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        self.pub_fastsam.publish(image_msg(img, stamp))
 
     def publish_segmentation(self, s, masks, skipped, stamp, oversized=(), ids=None):
         """セグメンテーションの状況：マスクを部品の色で塗った画像と，マスクごとに色分けした点群．
@@ -835,11 +860,11 @@ def main():
     ap.add_argument("--sphere-edge-percent", type=float, default=0.10,
                     help="--sphere-feature edge のとき，計測点群から色の境界として取る点の割合（色の変化の大きい上位）．"
                          "--sphere-model-edge-all がなければモデル側も同じ割合")
-    ap.add_argument("--sphere-canonical", choices=["ref", "z_away"], default="ref",
+    ap.add_argument("--sphere-canonical", choices=["ref", "z_away"], default="z_away",
                     help="同じ縫い目に見える姿勢のうちどれを出すか．ref: 基準の向きに最も近いもの / "
                          "z_away: モデルの z 軸（RViz の青）がカメラの奥を最も向くもの")
     ap.add_argument("--sphere-switch-deg", type=float, default=20.0,
-                    help="--sphere-canonical ref と --symmetric-kalman のとき，ID ごとに保っている対称な姿勢を，"
+                    help="--symmetric-kalman のとき，ID ごとに保っている対称な姿勢を，"
                          "別の対称な姿勢の方が基準の向きにこれ [deg] 以上近くなったときだけ切り替える")
     ap.add_argument("--sphere-force-z", action="store_true",
                     help="ボールの TF の z 軸（RViz の青）を常にカメラの奥にそろえる（x 軸は縫い目から推定した向きを投影．"

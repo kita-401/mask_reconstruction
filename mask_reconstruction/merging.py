@@ -89,6 +89,8 @@ def cylinder_axis(p, cfg: Config, rng, normals=None):
         pc.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.normal_radius, max_nn=30))
         pc.orient_normals_towards_camera_location(np.zeros(3))
         n = np.asarray(pc.normals)
+    if len(n) < 3:   # 法線を使える点がほとんどない断片は軸を決められない（0 個の平均で NaN になり固有値分解が失敗する）
+        return None
     _, V = np.linalg.eigh(n.T @ n / len(n))
     d = V[:, 0]
     c = p - cfg.pipe_radius * n
@@ -98,7 +100,9 @@ def cylinder_axis(p, cfg: Config, rng, normals=None):
 
 
 def axis_segment_distance(ax1, ax2, ext, n_samples=60):
-    """2つの円筒軸を実在範囲（両端を ext 延長）の線分とみなしたときの最短距離 [m]．"""
+    """2つの円筒軸を実在範囲（両端を ext 延長）の線分とみなしたときの最短距離 [m]．軸を決められない断片（None）は無限大．"""
+    if ax1 is None or ax2 is None:
+        return np.inf
     segs = []
     for d, c0, t0, t1 in (ax1, ax2):
         segs.append(c0 + np.outer(np.linspace(t0 - ext, t1 + ext, n_samples), d))
