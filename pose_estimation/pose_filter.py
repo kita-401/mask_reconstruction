@@ -22,7 +22,7 @@ from scipy.spatial.transform import Rotation
 class PoseKalman:
     def __init__(self, pos_std=0.002, rot_std_deg=6.0, pos_rate=0.005, rot_rate_deg=5.0,
                  gate_deg=30.0, gate_m=0.02, reset_after=3, max_gap=3.0, symmetries=(),
-                 canonical_ref=None, switch_deg=20.0):
+                 canonical_ref=None, switch_deg=20.0, canonical_mode="ref"):
         """pos_std / rot_std_deg: 観測ノイズの標準偏差（1 フレームの推定の揺れ）[m] / [deg]
         pos_rate / rot_rate_deg: プロセスノイズ（1 秒あたりに許す姿勢の変化の標準偏差）[m/√s] / [deg/√s]
         gate_deg / gate_m: これより大きく外れた観測は捨てる
@@ -30,7 +30,10 @@ class PoseKalman:
         max_gap: これ [s] より長く観測がなければ，次の観測で初期化し直す
         symmetries: 物体の対称性（モデル座標での 4x4 変換 S のリスト．T と T @ S が同じ形になる）
         canonical_ref / switch_deg: 対称な姿勢のうちどれを出すかの基準の向き（カメラ座標の 3x3）と，切り替えの余裕 [deg]
+        canonical_mode: "ref"＝基準の向きに最も近い姿勢 / "z_away"＝モデルの z 軸がカメラの奥（+z）に最も近い姿勢
+            （z の向きがほぼ同じなら基準の向きに近い方）
         """
+        self.canonical_mode = canonical_mode
         self.canonical_ref = None if canonical_ref is None else np.asarray(canonical_ref, float)
         self.switch_rad = np.deg2rad(switch_deg)
         self.symmetries = [np.asarray(S, float) for S in symmetries]
@@ -49,7 +52,10 @@ class PoseKalman:
         self._canonicalize(margin=0.0)
 
     def _ref_dist(self, T):
-        return Rotation.from_matrix(T[:3, :3] @ self.canonical_ref.T).magnitude()
+        d_ref = Rotation.from_matrix(T[:3, :3] @ self.canonical_ref.T).magnitude()
+        if self.canonical_mode == "z_away":   # モデルの z 軸とカメラの奥の角度．基準の向きは同点のときの決め手だけ
+            return np.arccos(np.clip(T[2, 2], -1.0, 1.0)) + 0.05 * d_ref / np.pi
+        return d_ref
 
     def _canonicalize(self, margin):
         """推定を，対称な姿勢のうち基準の向きに最も近いものに置き換える（今の姿勢より margin [rad] 以上近いときだけ）．"""

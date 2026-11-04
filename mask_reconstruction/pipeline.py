@@ -44,6 +44,7 @@ class MaskReconstructor:
         t = time.perf_counter()
         if fragments is None:
             fragments = self.fragments(sample)
+        self.last_fragments = fragments   # FastSAM の断片（フィルタ・統合の前）．表示用に残す
         sync()
         times["FastSAM"], t = time.perf_counter() - t, time.perf_counter()
         depth_mm = compute_depth(self.lingbot, sample, self.cfg, self.device)

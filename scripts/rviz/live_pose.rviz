@@ -1,14 +1,14 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 70
+    Help Height: 0
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /点群1
         - /TF1
         - /TF1/Frames1
-      Splitter Ratio: 0.5
-    Tree Height: 187
+      Splitter Ratio: 0.47989949584007263
+    Tree Height: 143
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -56,7 +56,7 @@ Visualization Manager:
       Name: 点群
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 3
+      Size (Pixels): 5
       Size (m): 0.009999999776482582
       Style: Points
       Topic:
@@ -103,72 +103,210 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
-    - Class: rviz_default_plugins/PointCloud2
-      Name: MaskNetで削ったモデル
-      Enabled: true
-      Topic:
-        Value: /pose/masknet_models
-        Depth: 2
-        Reliability Policy: Best Effort
-      Style: Points
-      Size (Pixels): 4
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-    - Class: rviz_default_plugins/PointCloud2
-      Name: 位置合わせに使った計測点群
-      Enabled: true
-      Topic:
-        Value: /pose/measured_points
-        Depth: 2
-        Reliability Policy: Best Effort
-      Style: Points
-      Size (Pixels): 2
-      Color Transformer: RGB8
-      Decay Time: 0
-    - Class: rviz_default_plugins/PointCloud2
-      Name: 位置合わせ後のボールのモデル
-      Enabled: true
-      Topic:
-        Value: /pose/ball_models
-        Depth: 2
-        Reliability Policy: Best Effort
-      Style: Points
-      Size (Pixels): 3
-      Color Transformer: RGB8
-      Decay Time: 0
-    - Class: rviz_default_plugins/PointCloud2
-      Name: ボールの計測点群
       Enabled: false
-      Topic:
-        Value: /pose/ball_measured
-        Depth: 2
-        Reliability Policy: Best Effort
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: MaskNetで削ったモデル
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 4
+      Size (m): 0.009999999776482582
       Style: Points
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/masknet_models
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: 位置合わせに使った計測点群
+      Position Transformer: XYZ
+      Selectable: true
       Size (Pixels): 2
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/measured_points
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: 位置合わせ後のボールのモデル
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/ball_models
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: ボールの計測点群
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/ball_measured
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
       Name: ボールのモデルの色境界（水色）
-      Enabled: true
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 4
+      Size (m): 0.009999999776482582
+      Style: Points
       Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
         Value: /pose/ball_model_edges
-        Depth: 2
-        Reliability Policy: Best Effort
-      Style: Points
-      Size (Pixels): 4
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-    - Class: rviz_default_plugins/PointCloud2
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
       Name: ボールの計測の色境界（黄色）
-      Enabled: true
-      Topic:
-        Value: /pose/ball_measured_edges
-        Depth: 2
-        Reliability Policy: Best Effort
-      Style: Points
+      Position Transformer: XYZ
+      Selectable: true
       Size (Pixels): 4
-      Color Transformer: RGB8
-      Decay Time: 0
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/ball_measured_edges
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 5
@@ -176,64 +314,364 @@ Visualization Manager:
         All Enabled: false
         camera_color_optical_frame:
           Value: false
-        part_0:
+        part_100:
           Value: true
-        part_1:
+        part_102:
           Value: true
-        part_10:
+        part_103:
+          Value: true
+        part_104:
+          Value: true
+        part_105:
+          Value: true
+        part_106:
+          Value: true
+        part_107:
+          Value: true
+        part_108:
+          Value: true
+        part_109:
           Value: true
         part_11:
           Value: true
-        part_12:
+        part_111:
+          Value: true
+        part_114:
+          Value: true
+        part_116:
+          Value: true
+        part_117:
+          Value: true
+        part_120:
+          Value: true
+        part_122:
+          Value: true
+        part_123:
+          Value: true
+        part_124:
+          Value: true
+        part_125:
+          Value: true
+        part_126:
+          Value: true
+        part_128:
+          Value: true
+        part_129:
+          Value: true
+        part_13:
+          Value: true
+        part_130:
+          Value: true
+        part_131:
+          Value: true
+        part_132:
+          Value: true
+        part_133:
+          Value: true
+        part_134:
+          Value: true
+        part_135:
+          Value: true
+        part_138:
+          Value: true
+        part_139:
+          Value: true
+        part_140:
+          Value: true
+        part_142:
+          Value: true
+        part_145:
+          Value: true
+        part_15:
+          Value: true
+        part_17:
+          Value: true
+        part_18:
+          Value: true
+        part_19:
           Value: true
         part_2:
           Value: true
+        part_20:
+          Value: true
+        part_21:
+          Value: true
         part_3:
+          Value: true
+        part_30:
+          Value: true
+        part_31:
+          Value: true
+        part_33:
+          Value: true
+        part_34:
+          Value: true
+        part_36:
+          Value: true
+        part_37:
           Value: true
         part_4:
           Value: true
+        part_40:
+          Value: true
+        part_41:
+          Value: true
+        part_43:
+          Value: true
+        part_46:
+          Value: true
+        part_47:
+          Value: true
+        part_48:
+          Value: true
         part_5:
           Value: true
-        part_6:
+        part_50:
           Value: true
-        part_7:
+        part_54:
           Value: true
-        part_8:
+        part_55:
+          Value: true
+        part_56:
+          Value: true
+        part_58:
+          Value: true
+        part_59:
+          Value: true
+        part_62:
+          Value: true
+        part_63:
+          Value: true
+        part_65:
+          Value: true
+        part_69:
+          Value: true
+        part_71:
+          Value: true
+        part_73:
+          Value: true
+        part_75:
+          Value: true
+        part_76:
+          Value: true
+        part_78:
+          Value: true
+        part_79:
+          Value: true
+        part_80:
+          Value: true
+        part_81:
+          Value: true
+        part_82:
+          Value: true
+        part_85:
+          Value: true
+        part_86:
+          Value: true
+        part_87:
+          Value: true
+        part_88:
+          Value: true
+        part_89:
           Value: true
         part_9:
           Value: true
-      Marker Scale: 0.15000000596046448
+        part_90:
+          Value: true
+        part_91:
+          Value: true
+        part_92:
+          Value: true
+        part_93:
+          Value: true
+        part_95:
+          Value: true
+        part_96:
+          Value: true
+        part_98:
+          Value: true
+      Marker Scale: 0.25
       Name: TF
       Show Arrows: false
       Show Axes: true
       Show Names: false
       Tree:
         camera_color_optical_frame:
-          part_0:
+          part_100:
             {}
-          part_1:
+          part_102:
             {}
-          part_10:
+          part_103:
+            {}
+          part_104:
+            {}
+          part_105:
+            {}
+          part_106:
+            {}
+          part_107:
+            {}
+          part_108:
+            {}
+          part_109:
             {}
           part_11:
             {}
-          part_12:
+          part_111:
+            {}
+          part_114:
+            {}
+          part_116:
+            {}
+          part_117:
+            {}
+          part_120:
+            {}
+          part_122:
+            {}
+          part_123:
+            {}
+          part_124:
+            {}
+          part_125:
+            {}
+          part_126:
+            {}
+          part_128:
+            {}
+          part_129:
+            {}
+          part_13:
+            {}
+          part_130:
+            {}
+          part_131:
+            {}
+          part_132:
+            {}
+          part_133:
+            {}
+          part_134:
+            {}
+          part_135:
+            {}
+          part_138:
+            {}
+          part_139:
+            {}
+          part_140:
+            {}
+          part_142:
+            {}
+          part_145:
+            {}
+          part_15:
+            {}
+          part_17:
+            {}
+          part_18:
+            {}
+          part_19:
             {}
           part_2:
             {}
+          part_20:
+            {}
+          part_21:
+            {}
           part_3:
+            {}
+          part_30:
+            {}
+          part_31:
+            {}
+          part_33:
+            {}
+          part_34:
+            {}
+          part_36:
+            {}
+          part_37:
             {}
           part_4:
             {}
+          part_40:
+            {}
+          part_41:
+            {}
+          part_43:
+            {}
+          part_46:
+            {}
+          part_47:
+            {}
+          part_48:
+            {}
           part_5:
             {}
-          part_6:
+          part_50:
             {}
-          part_7:
+          part_54:
             {}
-          part_8:
+          part_55:
+            {}
+          part_56:
+            {}
+          part_58:
+            {}
+          part_59:
+            {}
+          part_62:
+            {}
+          part_63:
+            {}
+          part_65:
+            {}
+          part_69:
+            {}
+          part_71:
+            {}
+          part_73:
+            {}
+          part_75:
+            {}
+          part_76:
+            {}
+          part_78:
+            {}
+          part_79:
+            {}
+          part_80:
+            {}
+          part_81:
+            {}
+          part_82:
+            {}
+          part_85:
+            {}
+          part_86:
+            {}
+          part_87:
+            {}
+          part_88:
+            {}
+          part_89:
             {}
           part_9:
+            {}
+          part_90:
+            {}
+          part_91:
+            {}
+          part_92:
+            {}
+          part_93:
+            {}
+          part_95:
+            {}
+          part_96:
+            {}
+          part_98:
             {}
       Update Interval: 0
       Value: true
@@ -264,7 +702,21 @@ Visualization Manager:
         Value: /pose/masks
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: FastSAMのみ
+      Normalize Range: true
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /pose/fastsam
+      Value: false
+    - Class: rviz_default_plugins/Image
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -275,6 +727,34 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
+        Value: /pose/overlay
+      Value: false
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /pose/fastsam
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /pose/overlay
       Value: true
   Enabled: true
@@ -295,7 +775,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 0.800000011920929
+      Distance: 0.683870792388916
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -310,18 +790,22 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -1.2000000476837158
+      Pitch: -1.5497963428497314
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: -1.5707999467849731
+      Yaw: 4.612375736236572
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
+  FastSAMのみ:
+    collapsed: false
   Height: 1016
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001900000039cfc0200000004fb0000001230bb30b030e130f330c630fc30b730e730f3010000003e000000be0000002800fffffffb0000000863a85b9a7d50679c0100000102000000bd0000002800fffffffb000000100044006900730070006c00610079007301000001c50000013f000000ca00fffffffb0000000a00560069006500770073010000030a000000d0000000a600ffffff000005a40000039c00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Image:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001900000039cfc0200000005fb0000000a0049006d006100670065010000003e000000e40000002800fffffffc00000128000000ec0000002800fffffffa000000010100000002fb0000000863a85b9a7d50679c0000000000ffffffff0000006400fffffffb0000001230bb30b030e130f330c630fc30b730e730f3010000000000000190000000a000fffffffb0000000a0049006d006100670065010000021a000000ed0000002800fffffffb0000000a0056006900650077007300000001cd000000f3000000a600fffffffc0000030d000000cd000000ca00fffffffa000000010100000002fb00000012004600610073007400530041004d306e307f0000000000ffffffff0000007b00fffffffb000000100044006900730070006c0061007900730100000000000001900000015600ffffff000005a40000039c00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1850

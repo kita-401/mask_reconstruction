@@ -80,7 +80,7 @@ flowchart TD
     CIRC -- "はい（野球ボール）" --> B1["色付き点群（LingBot 補完後の深度，0.3 mm で間引き）"]
     B1 --> B2["既知の半径で球を当てはめ → 中心＝位置"]
     B2 --> B3["色の境界（上位 10%）を球面上の方向にし，球全体の YCB モデルと<br/>3 自由度の回転を探索（粗い探索 4 万通り → 細かく）"]
-    B3 --> B4["同じ縫い目に見える 4 姿勢のうちモデルの基準の向きに最も近いもの"]
+    B3 --> B4["同じ縫い目に見える 4 姿勢のうち青軸（z）がカメラの奥を最も向くもの"]
     B4 --> BK["カルマンフィルタ（--symmetric-kalman，ID ごとに同じ姿勢を保つ）"]
     PK --> TF["TF：camera_color_optical_frame → part_N（N は ID，10 Hz）"]
     BK --> TF
@@ -94,7 +94,7 @@ T字パイプの姿勢推定は 1 個あたり MaskNet 約 8 ms＋SVD 約 2 ms�
 
 ### 実行手順
 
-1. D405 を USB 3 で接続する．conda の `vlm_rag` 環境と ROS 2 Humble を使う（`run_live_pose.sh` が両方を読み込む）
+1. D405 を USB 3 で接続する（カメラノードは 30fps で始め，USB 2 などで始められなければ 15 → 10fps．深度の単位は起動時に 1 mm に設定する）．conda の `vlm_rag` 環境と ROS 2 Humble を使う（`run_live_pose.sh` が両方を読み込む）
 2. 部品をトレイに置き，次を実行する（カメラノード・RViz2・推定ノードが起動する）
 
    ```bash
@@ -128,6 +128,7 @@ T字パイプの姿勢推定は 1 個あたり MaskNet 約 8 ms＋SVD 約 2 ms�
 | `/camera/color/image_raw`, `/camera/aligned_depth/image_raw`, `/camera/color/camera_info` | Image / CameraInfo | カメラノードの出力（深度は mm，16UC1） |
 | `/pose/overlay` | Image | 推定したモデルを画像に重ねたもの |
 | `/pose/masks` | Image | セグメンテーション結果（ID 付き） |
+| `/pose/fastsam` | Image | FastSAM だけの断片（断片フィルタ・統合の前） |
 | `/pose/models` | MarkerArray | 推定姿勢に置いた T字パイプのモデル |
 | `/pose/segmented_points` | PointCloud2 | マスクごとに色分けした点群 |
 | `/pose/measured_points`, `/pose/masknet_models` | PointCloud2 | T字パイプの位置合わせに使った計測点群 / MaskNet で削ったモデル |
@@ -147,8 +148,10 @@ T字パイプの姿勢推定は 1 個あたり MaskNet 約 8 ms＋SVD 約 2 ms�
     枝管の軸（y）まわりに 180° 回した姿勢は形が同じなので，x・z の向きはどちらにもなりうる（カルマンフィルタは同一視して扱う）
   - 野球ボール（`pose_estimation/models/ball_ycb_ref.pcd`，YCB の 055_baseball から作成，半径 36.6 mm）：原点は球の中心．
     軸は `scripts/set_ball_model_frame.py` で実物を置いたときにカメラの軸と揃うように決めたもの．
-    縫い目は 180° 回すと重なる軸を 3 本持つので，同じ見え方の姿勢が 4 つある．基準の向きに最も近いものを選び，
-    `--symmetric-kalman` のとき ID ごとに同じ姿勢を保つ（別の姿勢の方が 20° 以上近くなったら切り替える，`--sphere-switch-deg`）．
+    縫い目は 180° 回すと重なる軸を 3 本持つので，同じ見え方の姿勢が 4 つある．モデルの z 軸（RViz の青）がカメラの奥を
+    最も向くものを選び（ほぼ同じなら基準の向きに近い方．`--sphere-canonical ref` なら基準の向きに最も近いもの），
+    `--symmetric-kalman` のとき ID ごとに同じ姿勢を保つ（別の姿勢の方が 20° 以上奥を向くようになったら切り替える，`--sphere-switch-deg`）．
+    ボールごとの傾きは残るので，どの姿勢でも青軸が横を向く置き方では真奥を向かない．
     位置（球の中心）は縫い目に関係なく決まる
 
 確認：
